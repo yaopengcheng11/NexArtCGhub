@@ -20,6 +20,9 @@ api/data/database.sqlite-*
 # Tool upload scratch (server-side tmp dirs from /api/tools/*)
 data/tools_uploads/
 
+# One-off test data used by manual smoke tests
+data/test_manifest/
+
 # Blend-asset binaries (uploaded by admins through /api/admin/blend-assets)
 data/blend_assets/
 

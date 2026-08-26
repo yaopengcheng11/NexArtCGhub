@@ -5,8 +5,8 @@
 <h1 align="center">CG Resource Hub</h1>
 
 <p align="center">
-  一个面向 CG / 3D 创作者的资源展示与下载平台。<br />
-  采用自研 <strong>Ethereal</strong> 暖色调编辑风设计，支持公开浏览、分类筛选、下载统计与后台 CRUD。
+  面向 CG / 3D 创作者的资源展示与下载平台。<br />
+  采用自研 <strong>Ethereal</strong> 暖色调编辑风设计，支持公开浏览、分类筛选、下载统计、邀请码注册、Houdini/Blender 在线工具与后台 CRUD。
 </p>
 
 <p align="center">
@@ -14,6 +14,7 @@
   <a href="#技术栈">技术栈</a> ·
   <a href="#快速开始">快速开始</a> ·
   <a href="#后端接口">API</a> ·
+  <a href="#安全模型">安全</a> ·
   <a href="#设计系统">设计系统</a>
 </p>
 
@@ -23,41 +24,46 @@
 
 ### 用户侧
 
-- 浏览资源卡片网格，支持筛选与排序
-- 按软件分类过滤：**All / Houdini / Unreal Engine / Blender**
-- 查看封面、标题、描述、标签 pills、下载次数
-- 点击「Get」按钮下载并自动累加下载计数
+- 浏览资源卡片网格，支持按软件（**Houdini / Unreal / Blender**）筛选
+- 查看封面、标题、描述、标签 pills、下载次数；点击「下载」累加计数
+- 邀请码注册 + 邮箱 / 用户名登录
 
-### 管理员侧
+### 在线工具（`/tools/*`）
 
-- JWT + HttpOnly Cookie 登录后台
-- 资源表格查看、新增、编辑、删除（带二次确认）
-- 标签以逗号字符串输入，自动 JSON 化
-- 实时查看每条资源的下载次数
+- **HIP Path Doctor**：上传 `.hip`，后台跑 Houdini hython，自动修复 `$HIP` / `$JOB` 路径错误（4 种 feature：转 slash、整段替换、找缺失、abs/rel 切换）
+- **HIP Format Bridge**：上传 `.step` / `.stl` / `.3ds` 等格式，自动通过 FreeCAD 转换成 `.hip`
+- **3DGS Auto Trainer**：上传图片 zip，自动跑 COLMAP 稀疏重建 + Houdini ML 3DGS TOP cook
+- 每个工具：每用户 5 req/min 限流、10 min hython watchdog、50 MB stdout 上限，失败返回 zip 内嵌 audit `.md`
 
-### 内置数据能力
+### 管理员侧（`/admin`）
 
-- 首次启动自动创建 SQLite 数据库与表
-- 自动创建默认管理员账号（`admin` / `admin123`）
-- 数据库为空时自动注入 3 条演示资源
+- JWT + HttpOnly Cookie 登录后台（30 天有效期）
+- **Resources** 标签页：表格 + 模态框表单 + 多维度标签选择器（software / element / technique）
+- **Users** 标签页：列表 / 删除（自己 / 最后一个 admin 不可删）
+- **Invites** 标签页：生成 / 复制链接 / 撤销邀请码
+- Stripe checkout（配置 key 后启用）：credits 购买 + HDA license 一次性签名下载
 
 ---
 
 ## 技术栈
 
-**前端**
+**前端** — `web/`
 
 - React 19 + Vite 6 + React Router 7
 - Tailwind CSS 4（`@tailwindcss/vite`）
-- `motion/react`（framer-motion 继任者，资源卡入场与悬浮）
-- `lucide-react` 图标
+- `motion/react` 动画 · `lucide-react` 图标
+- 所有 fetch 走 `lib/api.ts` 包装（带 credentials: 'include' + AbortController + 类型守卫）
+- i18n 双语（EN/ZH）强类型：`t('tool.foo')` 编译期校验
+- TypeScript `strict: true` + `noUncheckedIndexedAccess: true`
 
-**后端**
+**后端** — `api/`
 
-- Express 4 + `cookie-parser`
-- JWT（`jsonwebtoken`）+ `bcryptjs`
-- SQLite（`sqlite3` 驱动，`sqlite` 包装）
-- 开发模式由 `tsx` 运行，与 Vite 共享同一进程
+- Express 4 + `cookie-parser` + `express-rate-limit`
+- JWT（`jsonwebtoken`）+ `bcryptjs`（cost 12）
+- SQLite（`sqlite3` 驱动，`sqlite` 包装，WAL 模式，busy_timeout=5000，foreign_keys=ON）
+- Python 子进程：`spawn` hython.exe / blender.exe（10 min watchdog）
+- 自带 Stripe REST helper（无 npm SDK 依赖）+ HMAC webhook 签名校验 + 幂等表
+- TypeScript `strict: true` + `noUncheckedIndexedAccess: true`
 
 **设计**
 
@@ -71,333 +77,246 @@
 
 ### 环境要求
 
-- Node.js 18 及以上（推荐 20 LTS 或更新）
-- npm 9 及以上
+- Node.js **20 LTS** 或更新
+- npm 9 或更新
+- 可选：Houdini（Hython）for `/tools/hip-*` 与 `/tools/gsplats-trainer`，Blender for `/api/admin/blend-assets`
 
 ### 安装与启动
 
+项目是 **two-package monorepo**，前后端各自独立安装、独立运行：
+
 ```bash
+# 后端 — Express + SQLite
+cd api
 npm install
-npm run dev
+npm run dev          # tsx watch 模式，端口 8789
+
+# 前端 — Vite + React（另开一个终端）
+cd web
+npm install
+npm run dev          # 端口 5173，自动把 /api/* 代理到 8789
 ```
 
-然后打开 [http://localhost:3000](http://localhost:3000)。
+打开 <http://127.0.0.1:5173>。
 
 ### 后台登录
 
-访问 [http://localhost:3000/login](http://localhost:3000/login)，使用：
+访问 <http://127.0.0.1:5173/admin>，使用：
 
 ```text
-username: admin
-password: admin123
+email:    yao_pengcheng@outlook.com
+password: 123456
 ```
 
-> ⚠️ 默认管理员账号写在初始化逻辑中，仅适合演示或内网原型。上线前请尽快修改。
-
----
-
-## 技术架构
-
-项目不是传统的"前端开发服务器 + 独立 API 服务"拆分模式，而是由一个统一的 Node 入口启动：
-
-- 开发环境下，`server.ts` 启动 `Express`，并以中间件方式挂载 `Vite`
-- 生产环境下，`Express` 直接托管 `dist/` 中的前端静态文件
-- API 与前端页面共用同一个端口 `3000`
-
-整体流程：
-
-1. 浏览器访问 `/`
-2. Express 返回前端页面
-3. 前端通过 `/api/*` 调用资源与登录接口
-4. 服务端通过 SQLite 读写 `data/database.sqlite`
-5. 管理员登录成功后，服务端将 JWT 写入 `admin_token` Cookie
-6. 后续后台接口通过 Cookie 校验管理员身份
+> ⚠️ 默认管理员账号来自 `api/.env`（SUPER_ADMIN_EMAIL / SUPER_ADMIN_PASSWORD），**首次启动且仅当这两个 env 未设置时**，数据库初始化会用环境变量里配置的凭据创建管理员。后续重启不会再覆盖已存在的管理员密码。生产环境部署前请：
+> 1. 生成强随机 JWT_SECRET：`node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
+> 2. 修改 SUPER_ADMIN_PASSWORD
+> 3. 删除或替换 `api/.env` 中的默认值
 
 ---
 
 ## 目录结构
 
-```text
+```
 cg-resource-hub/
-|-- data/
-|   `-- database.sqlite          # SQLite 数据库文件（运行后生成，已 gitignore）
-|-- dist/                        # 前端构建产物
+|-- api/                           # 后端 — Express 4 + SQLite
+|   |-- server.ts                  # 路由 + 中间件 + startServer()
+|   |-- server/
+|   |   |-- db.ts                  # Schema + 迁移 + admin seed
+|   |   |-- stripe.ts              # Stripe REST + webhook sig verify
+|   |   `-- lib/
+|   |       `-- toolEndpoint.ts    # createToolEndpoint(spec) — 三个工具路由共享
+|   |-- tools/                     # Python 脚本（被 hython / blender 子进程调用）
+|   |   |-- hip_path_doctor.py
+|   |   |-- hip_format_bridge.py
+|   |   |-- gsplats_auto_trainer.py
+|   |   `-- blend_*.py
+|   |-- data/                      # SQLite 数据库（gitignore）
+|   |-- .env.example               # 环境变量模板
+|   `-- package.json
+|
+|-- web/                           # 前端 — Vite 6 + React 19
+|   |-- src/
+|   |   |-- pages/                 # 路由页面
+|   |   |   |-- Home.tsx           # /                — 资源列表
+|   |   |   |-- ResourceDetail.tsx # /resource/:id    — 详情 + 下载
+|   |   |   |-- ToolHipPathDoctor.tsx
+|   |   |   |-- ToolHipFormatBridge.tsx
+|   |   |   |-- ToolGsplatsTrainer.tsx
+|   |   |   |-- Pricing.tsx         # /pricing         — Stripe checkout
+|   |   |   |-- Login.tsx          # /login
+|   |   |   |-- Register.tsx       # /register
+|   |   |   `-- Admin.tsx          # /admin           — 控制台
+|   |   |-- components/             # 共享 + admin-scoped 组件
+|   |   |   |-- ProtectedRoute.tsx # 路由守卫
+|   |   |   |-- NotFound.tsx
+|   |   |   |-- ErrorBoundary.tsx
+|   |   |   |-- ConfirmDialog.tsx  # 替换 window.confirm，键盘可达
+|   |   |   |-- Toast.tsx          # 替换 alert，3 色自动消失
+|   |   |   `-- admin/             # Admin 子组件
+|   |   |       |-- UsersTab.tsx
+|   |   |       |-- InvitesTab.tsx
+|   |   |       |-- ResourceEditModal.tsx
+|   |   |       `-- FilePicker.tsx
+|   |   |-- hooks/
+|   |   |   `-- useToolRun.ts      # 工具页共享 state machine
+|   |   |-- lib/
+|   |   |   `-- api.ts             # apiFetch<T>() 包装（cookie + 类型守卫）
+|   |   |-- i18n/
+|   |   |   |-- I18nContext.tsx
+|   |   |   |-- dictionaries.ts     # 强类型 DictKey
+|   |   |   `-- zh.ts               # Record<DictKey, string>
+|   |   |-- types/
+|   |   |   `-- admin.ts           # 共享前端类型
+|   |   |-- context/
+|   |   |   `-- AuthContext.tsx
+|   |   |-- App.tsx
+|   |   `-- main.tsx
+|   `-- package.json
+|
+|-- scripts/baidu_pan/             # Baidu 网盘资源上传工具（独立 CLI）
 |-- docs/
-|   `-- cover.png                # README 顶部封面图
-|-- server/
-|   `-- db.ts                    # 数据库初始化、建表、种子数据
-|-- src/
-|   |-- components/
-|   |   `-- layout/
-|   |       |-- Navbar.tsx       # 顶部导航 + 品牌 mark
-|   |       `-- Footer.tsx       # 底部栏
-|   |-- context/
-|   |   `-- AuthContext.tsx      # 前端登录态上下文
-|   |-- lib/
-|   |   `-- utils.ts             # className 合并工具 (cn)
-|   |-- pages/
-|   |   |-- Home.tsx             # 首页 / 资源列表
-|   |   |-- Login.tsx            # 管理员登录页
-|   |   `-- Admin.tsx            # 资源管理后台
-|   |-- App.tsx                  # 路由、全局装饰层（光球 + 噪点）
-|   |-- index.css                # Tailwind 入口 + Ethereal 设计令牌
-|   `-- main.tsx                 # React 挂载入口
-|-- .env.example                 # 示例环境变量
+|   |-- cover.jpg                  # README 顶部封面图
+|   `-- BAIDU_PAN.md               # 网盘工具使用文档
+|-- DESIGN.md                      # 视觉风格指南
 |-- .gitignore
-|-- index.html                   # Vite HTML 模板（字体预连接）
-|-- package.json                 # 依赖与脚本
-|-- server.ts                    # 服务端主入口
-|-- tsconfig.json                # TypeScript 配置
-`-- vite.config.ts               # Vite 配置
+`-- README.md                      # ← you are here
 ```
 
----
+### 为什么不合并前后端？
 
-## 页面与功能
-
-### 首页 `/`（`src/pages/Home.tsx`）
-
-- 拉取 `/api/resources` 获取资源列表
-- 左侧分类筛选侧栏（毛玻璃面板），右侧资源卡片网格
-- 卡片含封面、标题、描述、标签 pills、下载次数与下载按钮
-- `motion/react` 错峰入场，悬浮时 `y: -4` 上浮
-
-### 登录页 `/login`（`src/pages/Login.tsx`）
-
-- 提交用户名和密码到 `/api/auth/login`
-- 登录成功后请求 `/api/auth/me` 写入 `AuthContext`
-- 跳转到 `/admin`
-- 页面底部展示默认管理员凭据，方便本地演示
-
-### 后台 `/admin`（`src/pages/Admin.tsx`）
-
-- 未登录时自动跳转到 `/login`
-- 拉取全部资源，表格展示（毛玻璃容器）
-- 弹窗表单新增/编辑：标题、描述、分类下拉、标签、封面 URL、下载 URL
-- 删除带 `confirm()` 二次确认
-- `tags` 表单以逗号分隔字符串输入，提交时转换为 JSON 字符串保存
+- **更干净的安装。** 前端开发者只需 `npm install` 在 `web/`，后端开发者只需 `npm install` 在 `api/`。互不污染 200MB+ 的无关依赖。
+- **独立扩缩容。** 把静态 `web/dist/` 部署到 CDN，API 跑在反向代理后；或者单 box 部署，由 API 直接 serve `web/dist/`（默认行为）。
+- **不同运行时。** API 用 Node 22 LTS，前端 bundle 跑在浏览器里。
 
 ---
 
-## 后端接口
-
-后端入口：`server.ts`
-
-### 鉴权相关
-
-| 方法 | 路径 | 说明 | 权限 |
-| --- | --- | --- | --- |
-| `POST` | `/api/auth/login` | 管理员登录 | 公开 |
-| `POST` | `/api/auth/logout` | 退出登录 | 已登录管理员 |
-| `GET` | `/api/auth/me` | 获取当前登录用户 | 已登录管理员 |
-
-Cookie 设置：
-
-- 名称：`admin_token`
-- 类型：`HttpOnly`
-- 生产环境：`secure: true`
-
-### 资源接口
-
-| 方法 | 路径 | 说明 | 权限 |
-| --- | --- | --- | --- |
-| `GET` | `/api/resources` | 获取资源列表，支持分类与搜索 | 公开 |
-| `GET` | `/api/resources/:id` | 获取单条资源详情 | 公开 |
-| `POST` | `/api/resources/:id/download` | 下载计数 +1 | 公开 |
-| `POST` | `/api/resources` | 新增资源 | 管理员 |
-| `PUT` | `/api/resources/:id` | 更新资源 | 管理员 |
-| `DELETE` | `/api/resources/:id` | 删除资源 | 管理员 |
-
-#### 查询参数
-
-`GET /api/resources` 支持：
-
-- `category`：按分类过滤
-- `search`：按标题或描述模糊搜索
-
-示例：
+## 生产构建
 
 ```bash
-GET /api/resources?category=Houdini
-GET /api/resources?search=environment
-GET /api/resources?category=UE&search=rock
+cd web
+npm run build       # → web/dist/
+
+cd ../api
+NODE_ENV=production npm start
 ```
 
-### 资源数据格式
+设置 `NODE_ENV=production` 后，API 自动把 `web/dist/` 作为静态文件 serve，加 SPA fallback 到 `index.html`。**单端口（默认 8789）同时托管 bundle 与 API**。
 
-```json
-{
-  "id": 1,
-  "title": "Houdini Procedural City Generator",
-  "description": "A powerful Node setup for creating procedural cities instantly.",
-  "category": "Houdini",
-  "tags": "[\"procedural\", \"city\", \"hda\", \"generator\"]",
-  "imageUrl": "https://example.com/image.jpg",
-  "fileUrl": "https://example.com/download.zip",
-  "downloadCount": 0,
-  "createdAt": "2026-04-20 09:00:00",
-  "updatedAt": "2026-04-20 09:00:00"
-}
-```
-
-- `tags` 在数据库中是字符串字段，内容通常为 JSON 字符串
-- 前端读取时优先尝试 `JSON.parse`，失败则退回到逗号分隔字符串模式
-
----
-
-## 数据库设计
-
-数据库初始化逻辑位于 `server/db.ts`。
-
-### `users` 表
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `id` | `INTEGER` | 主键，自增 |
-| `username` | `TEXT` | 用户名，唯一 |
-| `password` | `TEXT` | bcrypt 哈希后的密码 |
-
-### `resources` 表
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `id` | `INTEGER` | 主键，自增 |
-| `title` | `TEXT` | 资源标题 |
-| `description` | `TEXT` | 描述 |
-| `category` | `TEXT` | 分类（Houdini / UE / Blender） |
-| `tags` | `TEXT` | JSON 字符串 |
-| `imageUrl` | `TEXT` | 封面图地址 |
-| `fileUrl` | `TEXT` | 下载地址 |
-| `downloadCount` | `INTEGER` | 下载次数，默认 0 |
-| `createdAt` | `DATETIME` | 创建时间 |
-| `updatedAt` | `DATETIME` | 更新时间 |
-
-### 默认管理员
-
-数据库首次初始化时自动创建：
-
-- 用户名：`admin`
-- 密码：`admin123`
-
-正式项目请尽快修改默认密码。
-
-### 种子数据
-
-`resources` 表为空时自动写入 3 条演示资源：
-
-- Houdini Procedural City Generator
-- UE5 Realistic Environment Pack
-- Blender Hard Surface Addon
-
----
-
-## 设计系统
-
-> 本节描述项目自带的 **"Ethereal"** 设计语言：一种介于杂志编辑感与创作者工具站之间的暖色调视觉风格。
-
-### 色彩
-
-暖色羊皮纸为底，调色板用 CSS 变量定义（见 `src/index.css` 的 `@theme`）：
-
-| Token | 值 | 用途 |
-| --- | --- | --- |
-| `--color-base` | `#f2efe8` | 页面底色（羊皮纸暖灰） |
-| `--color-elevated` | `#fbfaf6` | 卡片/弹窗背景 |
-| `--color-deep` | `#e8e2d5` | 悬浮态加深 |
-| `--color-input` | `#f7f4ec` | 输入框背景 |
-| `--color-fg` | `#1a1814` | 主前景（接近黑但带暖意） |
-| `--color-fg-soft` | `#4a453e` | 次级前景 |
-| `--color-fg-muted` | `#8a8278` | 标签 / 辅助文字 |
-| `--color-fg-faint` | `#c5bfb1` | 最弱的提示线 |
-| `--color-accent` | `#a8806b` | 主点缀：陶土橙 |
-| `--color-accent-soft` | `#d4b896` | 辅助点缀：浅驼 |
-| `--color-accent-glow` | `rgba(168,128,107,.25)` | 选中态高光 |
-
-注意：项目**不是**深色 + emerald 风格，整套色系是浅色暖调。
-
-### 字体
-
-通过 `index.html` 预连接 Google Fonts 加载：
-
-- **Fraunces**：可变字重的衬线字体，用于 H1/H2/H3 与品牌名 `Hub`
-- **Inter**：300 字重的无衬线字体，用于正文与 UI 文本
-- **JetBrains Mono**：用于全大写、宽 `letter-spacing` 的小标签与序号
-
-### 视觉特效
-
-`src/App.tsx` 与 `src/index.css` 共同实现：
-
-- **悬浮光球（orb decoration）**：固定定位的三颗 `blur-3xl` 模糊大圆，分别使用 `--orb-warm`（暖橙）、`--orb-cool`（冷蓝灰）、`--orb-veil`（淡紫）
-- **全屏噪点纹理（grain layer）**：SVG `feTurbulence` 平铺，`opacity: 0.04`，`mix-blend-mode: overlay`
-- **玻璃态卡片（glassmorphism）**：所有卡片/侧栏/模态背景均使用 `rgba + backdrop-filter: blur(8–12px)`
-- **Motion 入场**：`motion/react` 实现资源卡错峰 fade + 24px 上移，悬浮 `y: -4`
-- **下划线动效**：导航项使用 `.ether-link::after`，宽度从 0 到 100% 平滑过渡
-
-### 品牌 mark
-
-Navbar 左侧 logo 故意做得很轻：单色小圆点 + `CG` + 斜体 `Hub`。整体走"少即是多"的编辑风。
+`npm run preview`（在 `web/`）跑生产构建的本地预览，同样带 `/api` 代理。
 
 ---
 
 ## 环境变量
 
-| 变量名 | 是否必需 | 说明 |
-| --- | --- | --- |
-| `JWT_SECRET` | 建议设置 | JWT 签名密钥；未设置时会使用代码中的默认回退值 |
-| `NODE_ENV` | 可选 | 控制开发/生产模式 |
-| `DISABLE_HMR` | 可选 | 在 `vite.config.ts` 中控制是否禁用 HMR |
+复制 `api/.env.example` 为 `api/.env` 后按需修改：
 
-`.env.example` 中还保留了 `GEMINI_API_KEY`、`APP_URL`，这两个是 AI Studio 模板遗留项：当前业务代码并不真正调用 Gemini API，按需忽略即可。
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `PORT` | `8789` | API 监听端口 |
+| `JWT_SECRET` | *（必填）* | ≥32 字符随机字符串；占位符或过短时服务**拒绝启动** |
+| `INVITE_CODE` | `ethereal-2026` | 邀请码静态回退；admin 在 `/admin` 生成的码覆盖它 |
+| `CORS_ORIGIN` | `http://localhost:5173` | dev CORS 来源，逗号分隔 |
+| `SUPER_ADMIN_EMAIL` | *（必填才能 seed）* | 引导 admin 邮箱 |
+| `SUPER_ADMIN_PASSWORD` | *（必填才能 seed）* | 引导 admin 密码 |
+| `HYTHON_PATH` | *(工具需要)* | `hython.exe` 绝对路径 |
+| `BLENDER_EXE` | `D:/Blender/blender.exe` | Blender 路径 |
+| `HDA_FILE_PATH` | *(可选)* | `.hda` 二进制路径（Stripe 销售用） |
+| `STRIPE_SECRET_KEY` | *(空 → /checkout 503)* | Stripe live secret |
+| `STRIPE_WEBHOOK_SECRET` | *(用了 Stripe 必填)* | webhook 签名密钥 |
+| `STRIPE_PUBLISHABLE_KEY` | *(可选)* | 暴露给 `/api/pricing` 给前端 |
+| `DB_PATH` | `./data/database.sqlite` | 相对 `api/` cwd |
 
----
-
-## 构建与生产
-
-```bash
-npm run build      # vite build → dist/
-npm run start      # NODE_ENV=production node server.ts
-```
-
-Windows PowerShell 下推荐：
-
-```powershell
-$env:NODE_ENV="production"; node server.ts
-```
+**前端无运行时环境变量**（刻意为之 —— API 是唯一可信源）。
 
 ---
 
-## 已知注意事项
+## 后端接口
 
-1. 默认管理员账号写死在初始化逻辑中，仅适合演示或内网原型。
-2. `JWT_SECRET` 未配置时使用硬编码回退值，不适合生产环境。
-3. `start` 脚本为 Unix 风格，Windows 下兼容性一般（见上节）。
-4. 资源下载接口只做下载计数累加，不负责真实文件代理或权限下载。
-5. `tags` 目前存为文本字段（JSON 字符串），结构不算严格，后续可标准化。
-6. 分类列表前端写死为 `Houdini / UE / Blender`。
-7. 登录页直接展示默认管理员凭据，正式环境建议移除。
-8. 整站为浅色暖调风格，不要误以为是深色 / emerald 主题。
+后端入口 `api/server.ts`。所有路由以 `/api` 为前缀。鉴权用 HttpOnly cookie `admin_token`（JWT，30 天有效期）。
+
+### 公开接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/auth/register` | `{ code, username, email, password }` |
+| `POST` | `/api/auth/login` | `{ username, password }`（username 可为邮箱） |
+| `POST` | `/api/auth/logout` | 清 cookie |
+| `GET` | `/api/auth/me` | 当前用户（需登录） |
+| `GET` | `/api/resources[?category=]` | 资源列表 |
+| `GET` | `/api/resources/:id` | 资源详情（解析 `tagGroups`） |
+| `POST` | `/api/resources/:id/download` | 计数 +1 |
+| `GET` | `/api/credits/balance` | `{ credits, isSubscribed, resetAt }`（需登录） |
+| `POST` | `/api/checkout/credits` | Stripe credits 结账（需登录） |
+| `POST` | `/api/checkout/hda` | Stripe HDA license（需登录） |
+| `GET` | `/api/payments/lookup?session_id=` | Stripe success 页元数据（需登录） |
+| `GET` | `/api/hda/download?token=…` | HDA 一次性签名下载 |
+| `GET` | `/api/pricing` | 价格表 + 区域 |
+| `GET` | `/api/blend-assets/:id/{assets,thumbnail,renders,manifest}` | blend 资产公开读 |
+
+### 工具接口（限流：每用户 5 req/min）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/tools/hip-path-doctor/run` | 上传 `.hip` → 修复后的 `.hip` + audit `.md` zip |
+| `POST` | `/api/tools/hip-format-bridge/run` | 上传 `.3ds`/`.step`/etc → `.hip` + audit zip |
+| `POST` | `/api/tools/gsplats-trainer/run` | 上传图片 zip → `.hip` + COLMAP cook |
+
+### 管理员接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/admin/resources` | 创建（支持 multipart 上传） |
+| `PUT` | `/api/admin/resources/:id` | 更新 |
+| `DELETE` | `/api/admin/resources/:id` | 删除（同时清 `data/blend_assets/:id/`） |
+| `POST` | `/api/admin/blend-assets` | `.blend` + 可选 `textures.zip` → manifest 流水线 |
+| `GET` | `/api/admin/users` | 用户列表 |
+| `DELETE` | `/api/admin/users/:id` | 删除（自己 / 最后一个 admin 不可删） |
+| `POST` | `/api/admin/users/:id/toggle-admin` | 升降级（最后一个 admin 不可降） |
+| `POST` | `/api/admin/users/:id/toggle-subscribe` | 手动切换订阅 |
+| `GET` | `/api/admin/invites` | 邀请码列表 |
+| `POST` | `/api/admin/invites` | 生成新码 |
+| `DELETE` | `/api/admin/invites/:id` | 撤销 |
+| `POST` | `/api/admin/credits/grant` | 手动积分 |
+| `GET` | `/api/admin/credits/users` | 积分余额 |
+
+### Stripe（仅配置 key 时启用）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/webhooks/stripe` | 原始 body + HMAC 校验 + **幂等**（webhook_events 表） |
 
 ---
 
-## 后续可扩展方向
+## 安全模型
 
-- 增加资源详情页
-- 支持标签筛选和分页
-- 接入对象存储或云盘签名下载
-- 管理员密码修改与用户管理
-- 上传图片与文件，而不是只填 URL
-- 增加操作日志
+这是真实生产代码，安全不是事后补丁。
+
+- **鉴权**：bcrypt 哈希（cost 12），JWT 写入 HttpOnly cookie，30 天有效期；JWT_SECRET 启动时强制要求 ≥32 字符且非占位符
+- **授权**：三层中间件 `requireAuth`（验 JWT + 每月积分重置）→ `requireAdmin`（角色检查）→ 路由内业务逻辑；`toggle-admin` 与 `DELETE /api/admin/users/:id` 都拒绝把最后一个 admin 降级/删除，控制台永不自我锁定
+- **Stripe webhook**：HMAC-SHA256 签名 + 时间戳 + 5 min 重放窗口；`webhook_events` 表用 `INSERT OR IGNORE` 存 event id，重复投递不会重复发积分或重复发 license
+- **子进程安全**：所有 spawn 用 `argv` 列表（不经过 shell）；启动前校验扩展名 + 大小；10 分钟 watchdog 强杀子进程；50 MB stdout 上限；任何退出路径都清理 tmp 目录
+- **并发写安全**：SQLite WAL 模式 + `busy_timeout=5000` + 外键强制；积分扣减是单条原子 `UPDATE … WHERE creditsRemaining > 0`，并发请求不可能双花
+- **限流**：工具端点 5 req/min/user（`express-rate-limit`）
+- **错误隔离**：catch 块记 stdout 详细日志，客户端永远拿到 generic JSON；全局 Express error middleware 接住任何逃逸的异步异常
+
+数据库表：`users`、`resources`、`invites`、`payments`、`licenses`、`hdaDownloads`、`webhook_events`、`collectionShareLinks`。关键约束：`users.role` / `payments.kind` / `payments.status` / `licenses.tier` 都有 `CHECK`，`payments.providerSessionId` / `licenses.key` / `hdaDownloads.token` 都有 `UNIQUE`。索引：`resources(createdAt DESC)`、`resources(category)`、`payments(userId)`、`licenses(userId)`、`invites(createdBy)`。
+
+---
+
+## 设计系统
+
+详见 [DESIGN.md](./DESIGN.md)。速查：
+
+- 背景 oat `#F2EFE8`，表面白 `#FBFAF6`
+- 主色 rose-gold `#A8806B`
+- Display：Fraunces（衬线）· UI：Inter（无衬线）· Mono：JetBrains Mono
+- 柔和噪点纹理、磨砂光球、无硬阴影
+
+---
+
+## 路线图
+
 - 增加资源审核、上下架状态
-- 收藏、评分、评论等社区能力
-- 将 SQLite 升级为 MySQL / PostgreSQL
-
----
-
-如果只是想马上跑起来：
-
-```bash
-npm install
-npm run dev
-```
-
-然后打开 [http://localhost:3000](http://localhost:3000)，使用 `admin / admin123` 进入后台。
+- 收藏 / 评分 / 评论等社区能力
+- 将 SQLite 升级到 MySQL / PostgreSQL（schema 已 portable，仅需替换 `api/server/db.ts`）
