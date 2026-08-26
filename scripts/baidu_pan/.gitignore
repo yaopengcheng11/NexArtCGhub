@@ -1,0 +1,12 @@
+# Local config + secrets — never commit
+config.yaml
+*.token.json
+
+# Virtualenv + Python noise
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Local mirror directory (synced with baidu pan; large/binary)
+data/

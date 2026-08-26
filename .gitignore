@@ -1,20 +1,82 @@
+# ===== Dependencies =====
+# Both web/ and api/ install separately, so the blanket rule covers both.
 node_modules/
-build/
+**/node_modules/
+
+# ===== Build output =====
+# web/dist/ holds the production frontend build.
 dist/
+build/
 coverage/
+
+# ===== Runtime data =====
+# SQLite database lives in api/data/ after the frontend/backend split.
+api/data/database.sqlite
+api/data/database.sqlite-*
+**/database.sqlite
+**/*.db
+**/*.sqlite
+
+# Tool upload scratch (server-side tmp dirs from /api/tools/*)
+data/tools_uploads/
+
+# Blend-asset binaries (uploaded by admins through /api/admin/blend-assets)
+data/blend_assets/
+
+# Houdini / blender asset caches + download fixtures
+cache/
+scripts/baidu_pan/cache/
+test_fixtures/
+
+# One-off Python scripts + downloaded installers (not part of the app)
+bake_white_lion.py
+api/tools/_installers/
+_api_notes/
+
+# Thumbnails / caches (frontend and tooling)
 .cbmm-cache/
+.thumb-cache/
+.web-cache/
 
-# Runtime data
-data/database.sqlite
-data/database.sqlite-journal
-data/database.sqlite-shm
-data/database.sqlite-wal
-
-# Local env files
+# ===== Local env =====
 .env
 .env.local
 .env.*.local
-.DS_Store
-*.log
 .env*
 !.env.example
+
+# ===== Logs =====
+*.log
+!.gitkeep
+.dev.log
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+
+# ===== Editor / IDE =====
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ===== Legacy / temporary =====
+# Old unified-mode leftovers from before the frontend/backend split.
+_legacy_root_backup/
+
+# ===== Python =====
+__pycache__/
+**/__pycache__/
+scripts/baidu_pan/.venv/
+*.pyc
+
+# ===== Dev-only scripts + test scaffolding (kept out of the repo) =====
+api/_peek_users.cjs
+api/_run_api.bat
+api/tools/__pycache__/
+api/tools/_e2e_test/
+api/tools/_test_run.py
+web/_drift_test.cjs
+web/_run_web.bat
+web/check-i18n.cjs
+web/scripts/

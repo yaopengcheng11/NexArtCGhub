@@ -1,0 +1,22 @@
+# =====================================================================
+# baidu_pan config — copy to `config.yaml` and edit.
+# `config.yaml` is git-ignored. The bypy library manages its own OAuth
+# token cache under `~/.bypy/bypy.json` after you run `init`.
+# =====================================================================
+
+# Default remote working directory (used by `sync up` / `sync down`).
+# The folder you just created.
+remote_root: /CGResourcesHub
+
+# Local mirror directory (used by `sync up` / `sync down`).
+# Files here get pushed to <remote_root>, or pulled from it.
+local_root: G:\AITOOLS\cg-resource-hub\data\cg_resources_pan
+
+# Behaviour when sync destination already exists.
+#   overwrite  — replace (default)
+#   skip       — leave existing local files alone
+#   fail       — abort on first conflict
+sync_conflict: overwrite
+
+# Maximum parallel upload/download workers (bypy's `concurrency`).
+concurrency: 3

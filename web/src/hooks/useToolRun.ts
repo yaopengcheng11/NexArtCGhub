@@ -1,0 +1,191 @@
+import { useCallback, useEffect, useState } from 'react';
+import { apiFetch } from '../lib/api';
+import { useAuth } from '../context/AuthContext';
+
+/**
+ * Shared credit balance + tool-run state machine for the three tool
+ * pages (hip-path-doctor / hip-format-bridge / gsplats-trainer). Each
+ * page used to maintain its own near-identical copies of this logic
+ * (~80 lines of duplicated fetch + FormData + header parsing + zip
+ * blob download). They now import this hook instead.
+ */
+
+export interface RunHeaders {
+  /** Custom HTTP header name carrying the JSON summary. */
+  summary: string;
+  /** Custom HTTP header name carrying the human-readable result text. */
+  result: string;
+  /** Custom HTTP header name carrying the remaining-credit count. */
+  credits: string;
+}
+
+export interface RunResult<S = unknown> {
+  /** Parsed summary JSON from the response header. */
+  summary: S | null;
+  /** Plain-text result block from the response header. */
+  resultText: string;
+  /** Response body as Blob (the zip download). */
+  blob: Blob;
+  /** Server-suggested filename (from Content-Disposition). */
+  filename: string;
+  /** Remaining credits after the run, or null if subscribed. */
+  creditsRemaining: number | null;
+  /** Mirror of the run text — used to render in the UI. */
+  message: string;
+}
+
+export interface UseToolRunOptions {
+  endpoint: string;
+  /** Custom header names (different per tool). */
+  headers: RunHeaders;
+  /** Build the FormData. Most callers only need the file + extra fields. */
+  buildFormData: (file: File, extras?: Record<string, string>) => FormData;
+  /** Long-running tool uploads deserve a bigger timeout. */
+  timeoutMs?: number;
+  /** Fallback message shown if the server doesn't return one. */
+  defaultMessage: string;
+}
+
+export function useToolRun(opts: UseToolRunOptions) {
+  const { user } = useAuth();
+  const [credits, setCredits] = useState<number | null>(null);
+  const [isSubscribed, setIsSubscribed] = useState(false);
+  const [file, setFile] = useState<File | null>(null);
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<RunResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // Pull the user's credit balance + subscription flag whenever the
+  // auth context changes (login / refresh). The endpoint is public-ish
+  // but actually requires auth; apiFetch sends the cookie.
+  useEffect(() => {
+    if (!user) {
+      setCredits(null);
+      setIsSubscribed(false);
+      return;
+    }
+    let cancelled = false;
+    apiFetch<{ credits: number | null; isSubscribed: boolean }>(
+      '/api/credits/balance'
+    ).then((r) => {
+      if (cancelled || !r.ok) return;
+      setCredits(r.data.credits ?? 0);
+      setIsSubscribed(!!r.data.isSubscribed);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
+
+  const reset = useCallback(() => {
+    setResult(null);
+    setError(null);
+  }, []);
+
+  const run = useCallback(
+    async (extras?: Record<string, string>) => {
+      if (!file) {
+        setError('No file selected');
+        return;
+      }
+      setError(null);
+      setResult(null);
+      setRunning(true);
+      try {
+        const form = opts.buildFormData(file, extras);
+        const r = await fetch(opts.endpoint, {
+          method: 'POST',
+          body: form,
+          credentials: 'include',
+          signal: AbortSignal.timeout(opts.timeoutMs ?? 5 * 60_000),
+        });
+        if (!r.ok) {
+          let msg = `HTTP ${r.status}`;
+          try {
+            const body = await r.json();
+            msg = body.error || body.message || msg;
+          } catch {
+            /* not JSON */
+          }
+          setError(msg);
+          setRunning(false);
+          return;
+        }
+        // Pull tool-specific headers before we consume the body.
+        const summaryHdr = r.headers.get(opts.headers.summary);
+        const resultHdr = r.headers.get(opts.headers.result);
+        const creditsHdr = r.headers.get(opts.headers.credits);
+        const disp = r.headers.get('Content-Disposition') ?? '';
+        const filenameMatch = disp.match(/filename="?([^";]+)"?/);
+        const filename = filenameMatch?.[1] ?? 'download.zip';
+
+        const blob = await r.blob();
+        const summary = summaryHdr
+          ? safeJsonParse(decodeURIComponent(summaryHdr))
+          : null;
+        const resultText = resultHdr ? decodeURIComponent(resultHdr) : '';
+
+        // Auto-trigger browser download.
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        // Free the blob URL after the browser has had time to start
+        // the download — 5s matches the previous per-page magic number.
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+
+        const creditsRemaining =
+          creditsHdr === 'unlimited'
+            ? null
+            : creditsHdr
+              ? Number(creditsHdr)
+              : credits;
+        if (creditsRemaining !== null && Number.isFinite(creditsRemaining)) {
+          setCredits(creditsRemaining);
+        }
+        setResult({
+          summary,
+          resultText,
+          blob,
+          filename,
+          creditsRemaining,
+          message: opts.defaultMessage,
+        });
+      } catch (e: any) {
+        if (e?.name === 'TimeoutError') {
+          setError('Tool took too long — try again or use a smaller file.');
+        } else {
+          setError(e?.message || 'Network error');
+        }
+      } finally {
+        setRunning(false);
+      }
+    },
+    [file, opts, credits]
+  );
+
+  return {
+    user,
+    file,
+    setFile,
+    credits,
+    isSubscribed,
+    running,
+    result,
+    error,
+    setError,
+    run,
+    reset,
+  };
+}
+
+function safeJsonParse(s: string): any {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
+}

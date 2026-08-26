@@ -1,0 +1,139 @@
+@import "tailwindcss";
+
+/* ============================================================
+   Ethereal — design tokens
+   详见 DESIGN.md
+   ============================================================ */
+@theme {
+  /* Single sans family with a CJK fallback chain so Chinese characters
+     render in the OS's best CJK font (PingFang SC on Mac, Microsoft
+     YaHei on Windows) instead of falling through to a serif default. */
+  --font-display: "Inter", "Segoe UI", -apple-system, BlinkMacSystemFont,
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    "Microsoft YaHei UI", system-ui, sans-serif;
+  --font-sans: "Inter", "Segoe UI", -apple-system, BlinkMacSystemFont,
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    "Microsoft YaHei UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular,
+    "Sarasa Mono SC", "Microsoft YaHei", monospace;
+
+  --color-base: #f2efe8;
+  --color-elevated: #fbfaf6;
+  --color-deep: #e8e2d5;
+  --color-input: #f7f4ec;
+
+  --color-fg: #1a1814;
+  --color-fg-soft: #4a453e;
+  --color-fg-muted: #8a8278;
+  --color-fg-faint: #c5bfb1;
+
+  --color-accent: #a8806b;
+  --color-accent-soft: #d4b896;
+  --color-accent-glow: rgba(168, 128, 107, 0.25);
+}
+
+/* ============================================================
+   Base
+   ============================================================ */
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-weight: 400;
+  color: var(--color-fg);
+  background: var(--color-base);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "ss01", "cv11", "calt";
+  letter-spacing: -0.005em;
+}
+
+::selection {
+  background: var(--color-accent-glow);
+  color: var(--color-fg);
+}
+
+h1, h2, h3, h4 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  color: var(--color-fg);
+}
+
+/* ============================================================
+   Scrollbar (subtle, warm)
+   ============================================================ */
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: rgba(26, 24, 20, 0.12);
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(26, 24, 20, 0.22);
+}
+
+/* ============================================================
+   Noise grain (Ethereal texture)
+   全屏平铺 SVG 噪点,opacity 0.04, mix-blend overlay
+   ============================================================ */
+.grain-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  opacity: 0.04;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml;utf8,<svg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  background-size: 200px 200px;
+}
+
+/* ============================================================
+   Focus ring (consistent across all interactive elements)
+   ============================================================ */
+*:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-base), 0 0 0 4px var(--color-accent);
+  border-radius: inherit;
+}
+
+/* ============================================================
+   Underline link (used for nav items)
+   ============================================================ */
+.ether-link {
+  position: relative;
+  transition: color 0.3s ease;
+}
+.ether-link::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -2px;
+  width: 0;
+  height: 1px;
+  background: currentColor;
+  transition: width 0.3s ease;
+}
+.ether-link:hover::after,
+.ether-link[data-active="true"]::after {
+  width: 100%;
+}
+
+/* ============================================================
+   Live pulse (HIP Path Doctor "Live" badge)
+   ============================================================ */
+@keyframes live-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(168, 128, 107, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgba(168, 128, 107, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(168, 128, 107, 0);
+  }
+}

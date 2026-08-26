@@ -1,0 +1,4 @@
+bypy==1.8.9
+requests>=2.32
+pyyaml>=6.0
+rich>=13.0

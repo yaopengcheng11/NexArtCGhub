@@ -1,0 +1,63 @@
+import React from 'react';
+
+interface Props {
+  children: React.ReactNode;
+}
+interface State {
+  error: Error | null;
+}
+
+/**
+ * Top-level render-time error boundary. Catches any uncaught exception
+ * thrown during render and shows a "something broke" page with a
+ * reload button instead of leaving the user staring at a white screen.
+ */
+export class ErrorBoundary extends React.Component<Props, State> {
+  override state: State = { error: null };
+
+  static getDerivedStateFromError(error: Error): State {
+    return { error };
+  }
+
+  override componentDidCatch(error: Error, info: React.ErrorInfo) {
+    // eslint-disable-next-line no-console
+    console.error('[ErrorBoundary]', error, info);
+  }
+
+  override render() {
+    if (this.state.error) {
+      return (
+        <div className="flex flex-col items-center justify-center min-h-[60vh] text-center px-6">
+          <h1
+            className="text-3xl mb-2"
+            style={{
+              fontFamily: 'var(--font-display)',
+              fontWeight: 500,
+              color: 'var(--color-fg)',
+            }}
+          >
+            Something broke.
+          </h1>
+          <p
+            className="text-sm mb-6 max-w-md"
+            style={{ color: 'var(--color-fg-muted)' }}
+          >
+            {this.state.error.message || 'An unexpected error occurred.'}
+          </p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="px-6 py-2.5 text-[11px] uppercase tracking-[0.2em] rounded-full transition-colors"
+            style={{
+              background: 'var(--color-fg)',
+              color: 'var(--color-elevated)',
+            }}
+          >
+            Reload
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
