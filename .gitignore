@@ -83,3 +83,6 @@ web/_drift_test.cjs
 web/_run_web.bat
 web/check-i18n.cjs
 web/scripts/
+
+# baidu-pan share batch run output (regenerated each run)
+.shares_map.json

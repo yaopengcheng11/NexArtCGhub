@@ -79,7 +79,7 @@ def load_config() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def get_client() -> bypy.Bypy:
+def get_client() -> bypy.ByPy:
     """Return a configured bypy client.
 
     bypy reads its token from `~/.bypy/bypy.json` after the first
@@ -87,7 +87,7 @@ def get_client() -> bypy.Bypy:
     """
     cfg = load_config()
     concurrency = int(cfg.get("concurrency", 3))
-    return bypy.Bypy(rapidupload=True)
+    return bypy.ByPy()
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +106,7 @@ def cmd_init(_args: argparse.Namespace) -> int:
     # bypy's `Bypy().auth()` walks the flow. The user pastes the redirect URL
     # or just the `code` value.
     try:
-        bp = bypy.Bypy(rapidupload=True)
+        bp = bypy.ByPy()
     except Exception as exc:  # noqa: BLE001
         err.print(f"bypy 初始化失败: {exc}")
         return 1
