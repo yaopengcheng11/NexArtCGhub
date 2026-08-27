@@ -69,10 +69,18 @@ export function verifyStripeSignature(
   if (!webhookSecret) {
     throw new Error('STRIPE_WEBHOOK_SECRET is not configured');
   }
+  // Defensive: a reverse proxy could swallow the body (Content-Length: 0,
+  // middleware ordering bug). Fail with a distinct error so ops don't
+  // misdiagnose it as a signature problem.
+  if (!Buffer.isBuffer(rawBody) || rawBody.length === 0) {
+    throw new Error('empty_raw_body');
+  }
   if (!signatureHeader) {
     throw new Error('missing_stripe_signature');
   }
-  const header = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
+  const header = Array.isArray(signatureHeader)
+    ? signatureHeader[0] ?? ''
+    : signatureHeader;
   const parts = header.split(',').map((p) => p.trim());
   const timestamp = parts
     .find((p) => p.startsWith('t='))
@@ -92,9 +100,13 @@ export function verifyStripeSignature(
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
     throw new Error('signature_mismatch');
   }
-  // Reject events older than 5 minutes (replay window).
+  // Reject events outside the 5-minute replay window. Future timestamps
+  // are rejected too (Math.abs would otherwise accept a +299s
+  // clock-skew delivery; Stripe clocks are NTP-synced so this only
+  // blocks attackers).
   const tsSec = parseInt(timestamp, 10);
-  if (!Number.isFinite(tsSec) || Math.abs(Date.now() / 1000 - tsSec) > 300) {
+  const skew = Date.now() / 1000 - tsSec;
+  if (!Number.isFinite(tsSec) || skew > 300 || skew < -300) {
     throw new Error('signature_too_old');
   }
   let event: any;

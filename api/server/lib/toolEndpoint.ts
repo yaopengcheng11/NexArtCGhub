@@ -28,21 +28,26 @@ export interface ToolEndpointSpec {
   name: string;
   /** hython executable path (env-overridden). */
   hythonPath: string;
-  /** Where uploaded files land. Must already exist (server creates it). */
+  /** Where uploaded files land (must exist; makeToolUpload creates it). */
   tmpDirRoot: string;
   /** Max upload bytes. */
   maxBytes: number;
   /** Path to the python script to spawn. */
   scriptPath: string;
-  /** Multer fileFilter — return null to accept, Error to reject. */
-  fileFilter: (originalName: string) => Error | null;
-  /** Per-request validation AFTER upload. Throw to reject with 400. */
+  /**
+   * Multer fileFilter — only consumed by makeToolUpload (which is
+   * constructed from a Pick of this spec), not by createToolEndpoint
+   * itself. Optional here because the upload middleware can be built
+   * separately.
+   */
+  fileFilter?: (originalName: string) => Error | null;
+  /** Per-request validation AFTER upload. Return an error string to 400. */
   validate?: (req: Request) => string | null;
   /** Build the CLI args passed to hython. */
   buildArgs: (ctx: ToolRunContext) => string[];
-  /** Optional `.hip` output filename (inside the tmp dir). */
+  /** Output .hip path (inside the tmp dir). */
   outputHipPath: (ctx: ToolRunContext) => string;
-  /** Optional `.md` audit path (defaults to <output>.hip + _NexArt_*.md). */
+  /** Optional .md audit path. */
   outputMdPath?: (ctx: ToolRunContext) => string;
   /** Marker text inside stderr that bounds the clean RESULT block. */
   resultMarker: string;
@@ -86,6 +91,7 @@ export function makeToolUpload(spec: Pick<ToolEndpointSpec, 'tmpDirRoot' | 'maxB
     }),
     limits: { fileSize: spec.maxBytes, files: 1 },
     fileFilter: (_req, file, cb) => {
+      if (!spec.fileFilter) return cb(null, true);
       const err = spec.fileFilter(file.originalname);
       if (err) return cb(err);
       cb(null, true);
@@ -120,14 +126,48 @@ export function createToolEndpoint(spec: ToolEndpointSpec) {
       }
     }
 
-    // Credit gate (atomic; we don't pre-decrement, we just refuse if no credits).
+    // Credit gate — atomic decrement BEFORE spawning. This is the
+    // single source of truth: if the UPDATE returns 0 changes, no
+    // concurrent request beat us to the last credit and we must refuse.
+    // Earlier code did check-then-act (race-y: 5 concurrent requests
+    // could all pass the gate and all execute hython; this closes that).
+    //
+    // For subscribed users we skip the decrement entirely (credits
+    // behave as "unlimited").
     const user = (req as any).user;
-    if (!user.isSubscribed && (user.creditsRemaining ?? 0) <= 0) {
+    const reqDb = (req as any).db;
+    if (!reqDb) {
+      console.error(
+        `[tool:${spec.name}] req.db missing — server middleware bug; refusing to run`
+      );
       rmDirSafe(tmpDir);
-      return res.status(402).json({
-        error: 'no_credits',
-        message: 'You have used all your free runs for this month. Visit /pricing to get more.',
-      });
+      return res.status(500).json({ error: 'server_misconfigured' });
+    }
+    let chargedChanges = 0;
+    let remainingAfter: number | null = null;
+    if (!user.isSubscribed) {
+      const r: any = await reqDb.run(
+        `UPDATE users
+           SET creditsRemaining = MAX(0, creditsRemaining - 1)
+         WHERE id = ? AND creditsRemaining > 0`,
+        [user.id]
+      );
+      chargedChanges = r?.changes ?? 0;
+      if (chargedChanges === 0) {
+        rmDirSafe(tmpDir);
+        return res.status(402).json({
+          error: 'no_credits',
+          message:
+            'You have used all your free runs for this month. Visit /pricing to get more.',
+        });
+      }
+      const row: any = await reqDb.get(
+        `SELECT creditsRemaining FROM users WHERE id = ?`,
+        [user.id]
+      );
+      remainingAfter = row?.creditsRemaining ?? 0;
+    } else {
+      remainingAfter = null;
     }
 
     const ctx: ToolRunContext = {
@@ -160,20 +200,102 @@ export function createToolEndpoint(spec: ToolEndpointSpec) {
     let stdoutBuf = '';
     let stderrBuf = '';
     let stdoutBytes = 0;
+    // Spawn hython. `detached: true` on POSIX makes the child the leader
+    // of a new process group, so killTree() can SIGKILL the whole tree
+    // (Houdini spawns Mantra/ROP/Python workers). On Windows we use
+    // taskkill /T /F below for the same reason (TerminateProcess only
+    // kills the PID, leaving Mantra/RenderData workers alive).
     const child = spawn(spec.hythonPath, args, {
       windowsHide: true,
+      detached: process.platform !== 'win32',
       env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
     });
-    const watchdog = setTimeout(() => {
+
+    // Settle latch: every exit path goes through settle() so we only
+    // (a) clear the watchdog,
+    // (b) refund credit if we charged,
+    // (c) kill child + remove tmp,
+    // (d) write the response,
+    // exactly once. Without this, the watchdog (timer fires 10 min) and
+    // 'close' (child exits) race against each other and the client
+    // disconnect (req.on('aborted')/res.on('close')) — leading to
+    // double responses, double refunds, and tmpDir leaked.
+    let settled = false;
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(watchdog);
+      try { fn(); } catch (e) {
+        console.error(`[${spec.name}] settle error`, e);
+      }
+    };
+    const killTree = () => {
+      if (child.killed || child.exitCode !== null) return;
       try { child.kill('SIGKILL'); } catch { /* already dead */ }
-      rmDirSafe(tmpDir);
-      if (!res.headersSent) res.status(504).json({ error: 'tool_timeout' });
+      if (process.platform === 'win32') {
+        // taskkill /T /F walks the whole process tree (Mantra, ROP
+        // workers, Python interpreters spawned by hython). Without
+        // /T, parent kill leaves the workers holding .hip mmap locks
+        // that prevent fs.rmSync from cleaning the tmpDir.
+        try {
+          spawn('taskkill', ['/PID', String(child.pid ?? 0), '/T', '/F'], {
+            stdio: 'ignore',
+            detached: true,
+            windowsHide: true,
+          });
+        } catch { /* best effort */ }
+      } else if (child.pid) {
+        // POSIX: child is a detached process-group leader (spawn used
+        // detached: true), so -pid kills the whole group.
+        try { process.kill(-child.pid, 'SIGKILL'); } catch { /* */ }
+      }
+    };
+
+    const watchdog = setTimeout(() => {
+      settle(() => {
+        killTree();
+        if (!res.headersSent) res.status(504).json({ error: 'tool_timeout' });
+        // Don't refund on timeout — user ran out of patience, the work
+        // ran to its conclusion (or got stuck). Charging is correct.
+        rmDirSafe(tmpDir);
+      });
     }, 10 * 60 * 1000);
+
+    // Client disconnect: even if hython is happily producing output,
+    // the receiver went away. Kill the subprocess so we don't waste
+    // CPU + disk on a zip nobody is reading. (res.on('close') fires
+    // for both normal completion and abrupt close, so we can't use it
+    // alone — but the settled latch prevents the duplicate-response bug.)
+    res.on('close', () => {
+      settle(() => {
+        killTree();
+        // No refund on client disconnect — they cancelled, the work
+        // doesn't count for them but the GPU time was spent.
+        rmDirSafe(tmpDir);
+      });
+    });
 
     child.stdout.on('data', (b: Buffer) => {
       stdoutBytes += b.length;
       if (stdoutBytes > 50 * 1024 * 1024) {
-        try { child.kill('SIGKILL'); } catch { /* */ }
+        // Tool is misbehaving (or the user uploaded a 200MB .blend that
+        // produces megabytes of stdout). Kill and report — don't pretend
+        // it succeeded.
+        settle(() => {
+          killTree();
+          if (!res.headersSent) {
+            // Refund: the user's work didn't produce a result, they
+            // didn't get any value.
+            if (chargedChanges > 0) {
+              reqDb.run(
+                `UPDATE users SET creditsRemaining = creditsRemaining + 1 WHERE id = ?`,
+                [user.id]
+              ).catch(() => undefined);
+            }
+            res.status(502).json({ error: 'tool_output_too_large' });
+            rmDirSafe(tmpDir);
+          }
+        });
         return;
       }
       stdoutBuf += b.toString('utf-8');
@@ -181,87 +303,109 @@ export function createToolEndpoint(spec: ToolEndpointSpec) {
     child.stderr.on('data', (b: Buffer) => { stderrBuf += b.toString('utf-8'); });
 
     child.on('error', (err) => {
-      clearTimeout(watchdog);
-      rmDirSafe(tmpDir);
-      if (!res.headersSent) res.status(500).json({ error: 'tool_spawn_failed' });
+      settle(() => {
+        if (chargedChanges > 0) {
+          reqDb.run(
+            `UPDATE users SET creditsRemaining = creditsRemaining + 1 WHERE id = ?`,
+            [user.id]
+          ).catch(() => undefined);
+        }
+        rmDirSafe(tmpDir);
+        if (!res.headersSent) res.status(500).json({ error: 'tool_spawn_failed' });
+      });
     });
 
     child.on('close', async (code) => {
-      clearTimeout(watchdog);
-
-      const db = (req as any).db;
-      const fail = (msg: string, extra?: object) => {
-        rmDirSafe(tmpDir);
-        if (!res.headersSent) res.status(500).json({ error: msg, ...extra });
-      };
-
-      if (code !== 0) {
-        return fail(`${spec.name} failed (exit ${code}).`, { stderr: stderrBuf.slice(-2000) });
-      }
-      // Last-line summary (most tools print JSON to stdout's last line).
-      let summary: any = {};
-      try {
-        const lastLine = stdoutBuf.trim().split(/\r?\n/).pop() || '{}';
-        summary = JSON.parse(lastLine);
-      } catch { /* non-fatal */ }
-
-      if (!fs.existsSync(outHipPath)) {
-        return fail(`${spec.name} did not produce output.`);
-      }
-
-      // Pull clean RESULT text from stderr.
-      const markerRe = new RegExp(
-        `===\\s+${spec.resultMarker}\\s+===\\r?\\n([\\s\\S]*?)===\\s+/${spec.resultMarker}\\s+===`
-      );
-      const markerMatch = stderrBuf.match(markerRe);
-      const cleanResult = markerMatch ? markerMatch[1].replace(/\r\n/g, '\n').trim() : '';
-
-      // Build the zip parts.
-      const zipParts: { name: string; data: Buffer }[] = [
-        { name: path.basename(outHipPath), data: fs.readFileSync(outHipPath) },
-      ];
-      if (outMdPath && fs.existsSync(outMdPath)) {
-        zipParts.push({
-          name: outMdPath.split(/[\\/]/).pop() as string,
-          data: fs.readFileSync(outMdPath),
-        });
-      }
-
-      // Inline buildZip import — small wrapper that doesn't pull a 3rd-party dep.
-      const zipBuf = buildZip(zipParts);
-      res.setHeader('Content-Type', 'application/zip');
-      res.setHeader('Content-Disposition', `attachment; filename="${spec.name}-${origStem}.zip"`);
-      res.setHeader(spec.headers.summary, encodeURIComponent(JSON.stringify(summary)));
-      res.setHeader(spec.headers.result, encodeURIComponent(cleanResult));
-
-      // Atomic credit decrement
-      let remainingAfter: number | null = null;
-      if (!user.isSubscribed) {
-        try {
-          const r: any = await db.run(
-            `UPDATE users
-               SET creditsRemaining = MAX(0, creditsRemaining - 1)
-             WHERE id = ? AND creditsRemaining > 0`,
-            [user.id]
+      settle(() => {
+        const dbLocal = (req as any).db;
+        if (!dbLocal) {
+          console.error(
+            `[tool:${spec.name}] req.db missing — server middleware bug; ` +
+              `skipping credit decrement + audit log`
           );
-          if (r.changes > 0) {
-            const row: any = await db.get(
-              `SELECT creditsRemaining FROM users WHERE id = ?`,
-              [user.id]
-            );
-            remainingAfter = row?.creditsRemaining ?? 0;
-          } else {
-            remainingAfter = 0;
+          rmDirSafe(tmpDir);
+          if (!res.headersSent) {
+            res.status(500).json({ error: 'server_misconfigured' });
           }
-        } catch (e) {
-          console.warn(`[${spec.name}] credit decrement failed for user`, user.id, e);
+          return;
         }
-      } else {
-        remainingAfter = null;
-      }
-      res.setHeader(spec.headers.credits, remainingAfter === null ? 'unlimited' : String(remainingAfter));
-      res.setHeader('Content-Length', String(zipBuf.length));
-      res.end(zipBuf, () => rmDirSafe(tmpDir));
+        const fail = (msg: string, extra?: object) => {
+          if (chargedChanges > 0) {
+            dbLocal.run(
+              `UPDATE users
+                 SET creditsRemaining = creditsRemaining + 1
+               WHERE id = ?`,
+              [user.id]
+            ).catch((e: unknown) => {
+              console.warn(`[${spec.name}] credit refund failed for user`, user.id, e);
+            });
+          }
+          rmDirSafe(tmpDir);
+          if (!res.headersSent) res.status(500).json({ error: msg, ...extra });
+        };
+
+        if (code !== 0) {
+          return fail(`${spec.name} failed (exit ${code}).`, {
+            stderr: stderrBuf.slice(-2000),
+          });
+        }
+        // Last-line summary (most tools print JSON to stdout's last line).
+        let summary: any = {};
+        try {
+          const lastLine = stdoutBuf.trim().split(/\r?\n/).pop() || '{}';
+          summary = JSON.parse(lastLine);
+        } catch {
+          /* non-fatal */
+        }
+
+        if (!fs.existsSync(outHipPath)) {
+          return fail(`${spec.name} did not produce output.`);
+        }
+
+        // Pull clean RESULT text from stderr.
+        const markerRe = new RegExp(
+          `===\\s+${spec.resultMarker}\\s+===\\r?\\n([\\s\\S]*?)===\\s+/${spec.resultMarker}\\s+===`
+        );
+        const markerMatch = stderrBuf.match(markerRe);
+        const cleanResult = markerMatch?.[1]
+          ? markerMatch[1].replace(/\r\n/g, '\n').trim()
+          : '';
+
+        // Build the zip parts.
+        const zipParts: { name: string; data: Buffer }[] = [
+          { name: path.basename(outHipPath), data: fs.readFileSync(outHipPath) },
+        ];
+        if (outMdPath && fs.existsSync(outMdPath)) {
+          zipParts.push({
+            name: outMdPath.split(/[\\/]/).pop() as string,
+            data: fs.readFileSync(outMdPath),
+          });
+        }
+
+        // Inline buildZip import — small wrapper that doesn't pull a 3rd-party dep.
+        const zipBuf = buildZip(zipParts);
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="${spec.name}-${origStem}.zip"`
+        );
+        res.setHeader(
+          spec.headers.summary,
+          encodeURIComponent(JSON.stringify(summary))
+        );
+        res.setHeader(spec.headers.result, encodeURIComponent(cleanResult));
+
+        // We debited credits atomically in the credit gate (so
+        // concurrent requests can't all pass); remainingAfter was
+        // captured there — no second UPDATE here. Refund on
+        // failure is handled by fail() above.
+        res.setHeader(
+          spec.headers.credits,
+          remainingAfter === null ? 'unlimited' : String(remainingAfter)
+        );
+        res.setHeader('Content-Length', String(zipBuf.length));
+        res.end(zipBuf, () => rmDirSafe(tmpDir));
+      });
     });
   };
 }
@@ -352,7 +496,8 @@ function buildZip(parts: { name: string; data: Buffer }[]): Buffer {
 function crc32(buf: Buffer): number {
   let c = 0xFFFFFFFF >>> 0;
   for (let i = 0; i < buf.length; i++) {
-    c = c ^ buf[i];
+    const byte = buf[i] ?? 0;
+    c = c ^ byte;
     for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xEDB88320 & -(c & 1));
   }
   return (c ^ 0xFFFFFFFF) >>> 0;

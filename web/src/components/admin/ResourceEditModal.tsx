@@ -6,14 +6,17 @@ import {
   type AdminResourceForm,
   type AdminTagCategory,
 } from '../../types/admin';
+import type { FormAction } from '../../pages/Admin';
 
 interface ResourceEditModalProps {
   formData: AdminResourceForm;
   /**
-   * Accepts a plain setState OR a dispatch from a reducer. We don't
-   * constrain the type so the parent can pass either shape.
+   * Dispatch from the parent's useReducer (typed against FormAction).
+   * Field edits dispatch `{ type: 'patch', patch: {...} }` — NOT the
+   * setState `(prev) => next` shape, which a reducer would silently
+   * misinterpret as an action object.
    */
-  setFormData: (action: any) => void;
+  setFormData: (action: FormAction) => void;
   editingId: number | null;
   onClose: () => void;
   onSave: (e: React.FormEvent) => void;
@@ -38,14 +41,58 @@ export function ResourceEditModal({
   const update = <K extends keyof AdminResourceForm>(
     key: K,
     value: AdminResourceForm[K]
-  ) => setFormData((prev: AdminResourceForm) => ({ ...prev, [key]: value }));
+  ) => setFormData({ type: 'patch', patch: { [key]: value } } as FormAction);
+
+  // Escape to close + focus trap + scroll lock (matches ConfirmDialog).
+  const dialogRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        onClose();
+        return;
+      }
+      if (e.key === 'Tab' && dialogRef.current) {
+        const items = Array.from(
+          dialogRef.current.querySelectorAll<HTMLElement>(
+            'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+          )
+        ).filter((el) => !el.hasAttribute('disabled'));
+        if (items.length === 0) return;
+        const first = items[0];
+        const last = items[items.length - 1];
+        if (!first || !last) return;
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    window.addEventListener('keydown', handler);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    // Autofocus the title input so keyboard users start in the form.
+    dialogRef.current?.querySelector<HTMLInputElement>('input')?.focus();
+    return () => {
+      window.removeEventListener('keydown', handler);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [onClose]);
 
   return (
     <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="resource-edit-title"
       className="fixed inset-0 z-[100] flex items-center justify-center p-4"
       style={{ background: 'rgba(26, 24, 20, 0.32)', backdropFilter: 'blur(8px)' }}
     >
       <div
+        ref={dialogRef}
         className="rounded-3xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]"
         style={{
           background: 'var(--color-elevated)',
@@ -65,6 +112,7 @@ export function ResourceEditModal({
               {editingId ? '/ Edit' : '/ New asset'}
             </p>
             <h2
+              id="resource-edit-title"
               className="text-xl"
               style={{
                 fontFamily: 'var(--font-display)',

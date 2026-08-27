@@ -42,6 +42,20 @@ export interface ApiOptions extends Omit<RequestInit, 'body'> {
   body?: BodyInit | object | null;
   /** ms before the request is aborted. Default 30s; tool uploads 5min. */
   timeoutMs?: number;
+  /**
+   * How to read the response body. 'json' (default) tries JSON.parse and
+   * falls back to the raw string; 'blob' returns the raw Blob (use this
+   * for binary endpoints like /api/tools/[slash]/run or /api/hda/download:
+   * reading a zip through res.text() would decode it as UTF-8, corrupting
+   * the bytes and ballooning memory 3-4x).
+   */
+  responseType?: 'json' | 'blob';
+  /**
+   * Callers can pass their own AbortController signal (e.g. to cancel a
+   * long upload from the UI). It is combined with the internal timeout
+   * signal — whichever fires first wins.
+   */
+  signal?: AbortSignal | null;
 }
 
 /**
@@ -52,7 +66,14 @@ export async function apiFetch<T = unknown>(
   url: string,
   options: ApiOptions = {}
 ): Promise<ApiResult<T>> {
-  const { body, headers, timeoutMs = 30_000, ...rest } = options;
+  const {
+    body,
+    headers,
+    timeoutMs = 30_000,
+    responseType = 'json',
+    signal: callerSignal,
+    ...rest
+  } = options;
 
   const init: RequestInit = {
     credentials: 'include',
@@ -73,11 +94,47 @@ export async function apiFetch<T = unknown>(
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  init.signal = controller.signal;
+  // Combine the internal timeout with any caller-provided signal —
+  // previously a caller signal was silently overwritten by ours.
+  init.signal = callerSignal
+    ? (AbortSignal as any).any
+      ? (AbortSignal as any).any([controller.signal, callerSignal])
+      : controller.signal
+    : controller.signal;
 
   try {
     const res = await fetch(url, init);
     clearTimeout(timer);
+
+    // Binary response type: return the Blob untouched. Error responses
+    // still go through the JSON error path below (the server always
+    // returns JSON errors even for binary endpoints).
+    if (responseType === 'blob' && res.ok) {
+      const blob = await res.blob();
+      return { ok: true, status: res.status, data: blob as T };
+    }
+
+    // Never read an HTML error page as JSON — if the content-type is
+    // not JSON (proxy 502 pages, SPA fallback, etc.), surface a clean
+    // error instead of trying to parse it.
+    const contentType = res.headers.get('Content-Type') ?? '';
+    const isJson = contentType.includes('application/json');
+
+    if (!isJson) {
+      if (!res.ok) {
+        return {
+          ok: false,
+          status: res.status,
+          error:
+            res.status === 502 || res.status === 504
+              ? 'bad_gateway'
+              : `http_${res.status}`,
+        };
+      }
+      // 2xx but not JSON (rare) — return null data rather than garbage.
+      return { ok: true, status: res.status, data: null as T };
+    }
+
     const text = await res.text();
     let data: any = null;
     if (text) {
@@ -88,10 +145,16 @@ export async function apiFetch<T = unknown>(
       }
     }
     if (!res.ok) {
+      // Prefer body.error, then body.message (FastAPI convention), then
+      // statusText. Matches what useToolRun.ts does for its raw-fetch path.
+      const errMsg =
+        (data && typeof data === 'object' && (data.error || data.message)) ||
+        res.statusText ||
+        'request_failed';
       return {
         ok: false,
         status: res.status,
-        error: (data && typeof data === 'object' && data.error) || res.statusText || 'request_failed',
+        error: String(errMsg),
         data,
       };
     }
@@ -99,6 +162,9 @@ export async function apiFetch<T = unknown>(
   } catch (e: any) {
     clearTimeout(timer);
     if (e?.name === 'AbortError') {
+      return { ok: false, status: 0, error: 'timeout' };
+    }
+    if (e?.name === 'TimeoutError') {
       return { ok: false, status: 0, error: 'timeout' };
     }
     return { ok: false, status: 0, error: e?.message || 'network_error' };

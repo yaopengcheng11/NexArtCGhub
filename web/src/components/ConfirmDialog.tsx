@@ -28,15 +28,55 @@ export function ConfirmDialog({
   onCancel,
 }: ConfirmDialogProps) {
   const confirmRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onCancel();
-      else if (e.key === 'Enter') onConfirm();
+
+    const focusables = () => {
+      if (!dialogRef.current) return [] as HTMLElement[];
+      return Array.from(
+        dialogRef.current.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        )
+      ).filter((el) => !el.hasAttribute('disabled'));
     };
+
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        onCancel();
+        return;
+      }
+      if (e.key === 'Enter') {
+        // Only confirm when focus is inside the dialog — otherwise a
+        // stray Enter in a background input would silently fire the
+        // destructive action.
+        if (dialogRef.current?.contains(document.activeElement)) {
+          e.preventDefault();
+          onConfirm();
+        }
+        return;
+      }
+      if (e.key === 'Tab') {
+        // Focus trap: cycle focus within the dialog.
+        const items = focusables();
+        if (items.length === 0) return;
+        const first = items[0];
+        const last = items[items.length - 1];
+        if (!first || !last) return;
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
+
     window.addEventListener('keydown', handler);
-    // Move focus into the dialog so Tab cycles within.
+    // Move focus into the dialog (confirm is the primary action).
     confirmRef.current?.focus();
     // Lock body scroll while the dialog is up.
     const prevOverflow = document.body.style.overflow;
@@ -60,6 +100,7 @@ export function ConfirmDialog({
       onClick={onCancel}
     >
       <div
+        ref={dialogRef}
         className="w-full max-w-sm rounded-3xl p-6 shadow-2xl"
         style={{
           background: 'var(--color-elevated)',

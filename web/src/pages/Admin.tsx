@@ -24,13 +24,15 @@ const TABS = [
 
 // ---- useReducer form state -----------------------------------------------
 
-type FormAction =
+// Exported so ResourceEditModal can type its `setFormData` prop against
+// the real dispatch signature instead of `(action: any) => void`.
+export type FormAction =
   | { type: 'reset' }
   | { type: 'load'; resource: AdminResource }
   | { type: 'patch'; patch: Partial<AdminResourceForm> }
   | { type: 'toggleTag'; category: AdminTagCategory; tag: string };
 
-function formReducer(state: AdminResourceForm, action: FormAction): AdminResourceForm {
+export function formReducer(state: AdminResourceForm, action: FormAction): AdminResourceForm {
   switch (action.type) {
     case 'reset':
       return EMPTY_ADMIN_RESOURCE_FORM;

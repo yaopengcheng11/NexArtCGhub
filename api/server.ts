@@ -33,8 +33,20 @@ const PORT = parseInt(process.env.PORT || '8789', 10);
 // JWT_SECRET is required — refuse to boot if it's missing or still the
 // placeholder value. This prevents accidental deploys where anyone with
 // the repo could forge admin tokens.
+//
+// We reject:
+//   * missing / empty
+//   * < 32 characters of actual content (after trim)
+//   * "change_me" / "fallback" placeholder substrings
+//   * any whitespace-only secret (32+ spaces passed the old length check
+//     and `jwt.sign` accepts them silently — a true silent bypass)
 const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET || JWT_SECRET.length < 32 || JWT_SECRET.includes('change_me') || JWT_SECRET.includes('fallback')) {
+if (
+  !JWT_SECRET ||
+  JWT_SECRET.trim().length < 32 ||
+  JWT_SECRET.includes('change_me') ||
+  JWT_SECRET.includes('fallback')
+) {
   console.error(
     '[FATAL] JWT_SECRET is missing or looks like a placeholder. ' +
       'Set a strong random value (>= 32 chars) in api/.env before starting the API.'
@@ -270,7 +282,8 @@ function crc32(buf: Buffer): number {
   // implementation. Fast enough for typical .hip + .md sizes (< 100 MB).
   let c = 0xFFFFFFFF >>> 0;
   for (let i = 0; i < buf.length; i++) {
-    c = c ^ buf[i];
+    const byte = buf[i] ?? 0;
+    c = c ^ byte;
     for (let k = 0; k < 8; k++) {
       c = (c >>> 1) ^ (0xEDB88320 & -(c & 1));
     }
@@ -419,6 +432,15 @@ async function startServer() {
   // express.json() so it can see the raw body) can use it.
   const db = await initDb();
 
+  // Attach the shared db handle to every request. Routes / helpers
+  // (toolEndpoint, etc.) read it as `req.db` instead of importing the
+  // closure-scoped `db` directly — keeps middleware (requireAuth,
+  // stripe webhook, etc.) decoupled from the helper modules.
+  app.use((req: any, _res: any, next: any) => {
+    req.db = db;
+    next();
+  });
+
   // ----- Stripe webhook (raw body, signature verified) -----
   // MUST be registered before express.json() — that middleware would
   // otherwise consume the raw body and break Stripe's HMAC verification.
@@ -440,20 +462,30 @@ async function startServer() {
       // Idempotency: insert-or-ignore on event.id so retries don't
       // double-fulfil. We respond 200 even on dedup — Stripe considers
       // 4xx retriable.
-      try {
-        const r: any = await db.run(
-          `INSERT OR IGNORE INTO webhook_events (id, type) VALUES (?, ?)`,
-          [event.id, event.type]
-        );
-        if (r.changes === 0) {
-          return res.json({ received: true, dedup: true });
+      //
+      // CRITICAL: the dedup INSERT and the fulfilment block below must
+      // run in the SAME transaction. Two concurrent deliveries of the
+      // same event.id can both pass the standalone `INSERT OR IGNORE`
+      // (the first INSERT isn't yet visible to the second connection)
+      // and both run fulfilment — issuing a license + adding credits
+      // twice. We wrap the whole critical section in BEGIN IMMEDIATE.
+      const runWebhook = async (db: any) => {
+        try {
+          const r: any = await db.run(
+            `INSERT OR IGNORE INTO webhook_events (id, type) VALUES (?, ?)`,
+            [event.id, event.type]
+          );
+          if (r.changes === 0) {
+            return { dedup: true };
+          }
+        } catch (e: any) {
+          throw new Error(`dedup insert failed: ${e?.message}`);
         }
-      } catch (e: any) {
-        console.error('[stripe webhook] dedup insert failed:', e);
-        return res.status(500).json({ error: 'dedup_failed' });
-      }
 
-      if (event.type === 'checkout.session.completed') {
+        if (event.type !== 'checkout.session.completed') {
+          return { dedup: false, noop: true };
+        }
+
         const session = event.data.object;
         const meta = session.metadata || {};
         const kind = meta.kind;
@@ -464,56 +496,89 @@ async function startServer() {
           !Number.isFinite(userId) ||
           !Number.isFinite(paymentId)
         ) {
-          console.warn('[stripe webhook] missing/invalid metadata on session', session.id);
-          return res.json({ received: true, warning: 'metadata_missing' });
+          return { dedup: false, warning: 'metadata_missing' };
         }
-        try {
-          if (kind === 'credits') {
-            const credits = Number(meta.credits || 0);
+
+        if (kind === 'credits') {
+          const credits = Number(meta.credits || 0);
+          await db.run(
+            `UPDATE payments SET status = 'completed', completedAt = datetime('now') WHERE id = ?`,
+            [paymentId]
+          );
+          const user: any = await db.get(
+            `SELECT isSubscribed FROM users WHERE id = ?`,
+            [userId]
+          );
+          if (!user?.isSubscribed) {
             await db.run(
-              `UPDATE payments SET status = 'completed', completedAt = datetime('now') WHERE id = ?`,
-              [paymentId]
-            );
-            const user: any = await db.get(
-              `SELECT isSubscribed FROM users WHERE id = ?`,
-              [userId]
-            );
-            if (!user?.isSubscribed) {
-              await db.run(
-                `UPDATE users
-                   SET creditsRemaining = creditsRemaining + ?
-                 WHERE id = ?`,
-                [credits, userId]
-              );
-            }
-            console.log(`[stripe] +${credits} credits to user ${userId}`);
-          } else if (kind === 'hda') {
-            const tier = String(meta.tier);
-            const maxRuns = Number(meta.maxRuns || 0);
-            const durationDays = Number(meta.durationDays || 365);
-            const expiresAt = new Date(
-              Date.now() + durationDays * 86400 * 1000
-            ).toISOString();
-            const licenseKey = crypto.randomUUID();
-            await db.run(
-              `INSERT INTO licenses (userId, paymentId, key, tier, maxRuns, expiresAt)
-               VALUES (?, ?, ?, ?, ?, ?)`,
-              [userId, paymentId, licenseKey, tier, maxRuns, expiresAt]
-            );
-            await db.run(
-              `UPDATE payments
-                 SET status = 'completed', hdaLicenseKey = ?, completedAt = datetime('now')
+              `UPDATE users
+                 SET creditsRemaining = creditsRemaining + ?
                WHERE id = ?`,
-              [licenseKey, paymentId]
+              [credits, userId]
             );
-            console.log(`[stripe] HDA license ${licenseKey} issued to user ${userId}`);
           }
-        } catch (e: any) {
-          console.error('[stripe webhook] fulfilment failed:', e);
-          return res.status(500).json({ error: 'fulfilment_failed' });
+          return { dedup: false, msg: `+${credits} credits to user ${userId}` };
+        } else if (kind === 'hda') {
+          // Validate metadata against the DB's CHECK constraints BEFORE
+          // the INSERT so a malformed Stripe payload returns 4xx (and
+          // gets retried) instead of returning 500 forever. We swallow
+          // the bad event by rolling back (the dedup row goes too, so the
+          // next delivery will retry — but for HDA a human needs to
+          // intervene, so we just 4xx it).
+          const tier = String(meta.tier);
+          const maxRuns = Number(meta.maxRuns || 0);
+          const allowedTiers = new Set(['indie', 'studio', 'sub']);
+          if (
+            !allowedTiers.has(tier) ||
+            !(maxRuns > 0) ||
+            !Number.isFinite(maxRuns)
+          ) {
+            throw new Error(
+              `invalid_hda_metadata: tier=${tier} maxRuns=${maxRuns}`
+            );
+          }
+          const durationDays = Number(meta.durationDays || 365);
+          const expiresAt = new Date(
+            Date.now() + durationDays * 86400 * 1000
+          ).toISOString();
+          const licenseKey = crypto.randomUUID();
+          await db.run(
+            `INSERT INTO licenses (userId, paymentId, key, tier, maxRuns, expiresAt)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [userId, paymentId, licenseKey, tier, maxRuns, expiresAt]
+          );
+          await db.run(
+            `UPDATE payments
+               SET status = 'completed', hdaLicenseKey = ?, completedAt = datetime('now')
+             WHERE id = ?`,
+            [licenseKey, paymentId]
+          );
+          return { dedup: false, msg: `HDA license ${licenseKey} issued to user ${userId}` };
         }
+        return { dedup: false, warning: 'unknown_kind' };
+      };
+
+      let result: { dedup: boolean; noop?: boolean; warning?: string; msg?: string } = { dedup: false };
+      try {
+        await db.exec('BEGIN IMMEDIATE');
+        result = await runWebhook(db);
+        await db.exec('COMMIT');
+      } catch (e: any) {
+        await db.exec('ROLLBACK');
+        console.error('[stripe webhook] failed, rolled back:', e?.message);
+        const msg = e?.message || 'fulfilment_failed';
+        return res.status(500).json({ error: msg });
       }
-      res.json({ received: true });
+
+      if (result.dedup) {
+        return res.json({ received: true, dedup: true });
+      }
+      if (result.warning === 'metadata_missing' || result.warning === 'unknown_kind') {
+        console.warn('[stripe webhook]', result.warning, event.id);
+        return res.json({ received: true, warning: result.warning });
+      }
+      if (result.msg) console.log('[stripe]', result.msg);
+      return res.json({ received: true });
     }
   );
 
@@ -1134,10 +1199,10 @@ async function startServer() {
         'in text length', text.length, 'first 200 chars:', text.slice(0, 200));
       return null;
     }
-    try { return JSON.parse(m[1]); }
+    try { return JSON.parse(m[1] ?? ''); }
     catch (e: any) {
       console.warn('[extractSummary] JSON parse failed for marker', marker,
-        ':', e?.message, 'first 200 chars of match:', m[1].slice(0, 200));
+        ':', e?.message, 'first 200 chars of match:', String(m?.[1] ?? '').slice(0, 200));
       return null;
     }
   }
@@ -1588,6 +1653,7 @@ async function startServer() {
         thumbBytes = fs.readFileSync(thumbPath);
         const dup = all.find((f) =>
           f !== 'thumbnail.png' &&
+          !!thumbBytes &&
           fs.readFileSync(path.join(dir, f)).equals(thumbBytes)
         );
         if (dup) {
@@ -1672,22 +1738,41 @@ async function startServer() {
 
   app.post('/api/admin/users/:id/toggle-admin', requireAuth, requireAdmin, async (req: any, res: any) => {
     const id = Number(req.params.id);
-    const row: any = await db.get(`SELECT role FROM users WHERE id = ?`, [id]);
-    if (!row) return res.status(404).json({ error: 'not_found' });
-    const newRole = row.role === 'admin' ? 'user' : 'admin';
-    // Last-admin guard: refuse to demote if this is the only admin left
-    // (would lock the entire site out of the admin dashboard).
-    if (row.role === 'admin' && newRole === 'user') {
-      const otherAdmins: any = await db.get(
-        `SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND id != ?`,
-        [id]
-      );
-      if ((otherAdmins?.c ?? 0) === 0) {
-        return res.status(409).json({ error: 'cannot_demote_last_admin' });
-      }
+    if (id === req.user.id) {
+      // Mirrors DELETE: don't let an admin demote themselves. Recovery
+      // requires another admin (or a DB-level intervention).
+      return res.status(400).json({ error: 'cannot_toggle_self' });
     }
-    await db.run(`UPDATE users SET role = ? WHERE id = ?`, [newRole, id]);
-    res.json({ ok: true, role: newRole });
+    try {
+      // Atomic check-and-toggle. The guard `EXISTS (SELECT ... admin AND
+      // id != ?)` is evaluated as part of the UPDATE so concurrent
+      // requests can't both pass the last-admin gate and demote the
+      // only two admins to zero.
+      const sql =
+        `UPDATE users
+            SET role = CASE WHEN role = 'admin' THEN 'user' ELSE 'admin' END
+          WHERE id = ?
+            AND NOT (role = 'admin'
+                     AND NOT EXISTS (SELECT 1 FROM users
+                                     WHERE role = 'admin' AND id != ?))`;
+      const r: any = await db.run(sql, [id, id]);
+      if (r?.changes === 0) {
+        // Either the row didn't exist, or it was the last admin and
+        // we refused to demote. Disambiguate for the UI.
+        const row: any = await db.get(`SELECT role FROM users WHERE id = ?`, [id]);
+        if (!row) return res.status(404).json({ error: 'not_found' });
+        if (row.role === 'admin') {
+          return res.status(409).json({ error: 'cannot_demote_last_admin' });
+        }
+        // Was the last admin, row now user — return the new role.
+        return res.json({ ok: true, role: 'user' });
+      }
+      const row: any = await db.get(`SELECT role FROM users WHERE id = ?`, [id]);
+      res.json({ ok: true, role: row?.role });
+    } catch (e: any) {
+      console.error('[toggle-admin]', e?.message);
+      return res.status(500).json({ error: 'internal_error' });
+    }
   });
 
   app.post('/api/admin/users/:id/toggle-subscribe', requireAuth, requireAdmin, async (req: any, res: any) => {
@@ -1766,12 +1851,12 @@ async function startServer() {
       const header = buf.subarray(0, bytes).toString('utf-8');
       const hipfileMatch = header.match(/HIPFILE\s*=\s*'([^']+)'/);
       const jobMatch = header.match(/\bJOB\s*=\s*'([^']+)'/);
-      if (hipfileMatch) {
+      if (hipfileMatch?.[1]) {
         const hipfilePath = hipfileMatch[1].replace(/\\/g, '/');
         const parent = hipfilePath.replace(/\/[^/]+$/, '').replace(/\/+$/, '');
         if (parent) hipBase = parent;
       }
-      if (jobMatch) jobBase = jobMatch[1].replace(/\\/g, '/');
+      if (jobMatch?.[1]) jobBase = jobMatch[1].replace(/\\/g, '/');
     } catch (e) {
       console.warn('[tool] parseHipEnvDefaults failed for', hipPath, e);
     }

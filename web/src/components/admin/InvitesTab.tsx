@@ -39,7 +39,12 @@ export function InvitesTab() {
     if (!confirmRevoke) return;
     const target = confirmRevoke;
     setConfirmRevoke(null);
-    await apiFetch(`/api/admin/invites/${target.id}`, { method: 'DELETE' });
+    const r = await apiFetch(`/api/admin/invites/${target.id}`, { method: 'DELETE' });
+    if (!r.ok) {
+      toast.error(failureOf(r).error || `Revoke failed (${failureOf(r).status})`);
+      fetchInvites(); // refresh so the row reappears in the table
+      return;
+    }
     toast.success('Invite revoked');
     fetchInvites();
   };

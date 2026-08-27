@@ -121,17 +121,7 @@ export default function ToolGsplatsTrainer() {
     });
   };
 
-  const downloadResult = () => {
-    if (!tool.result) return;
-    const url = URL.createObjectURL(tool.result.blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = tool.result.filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
-  };
+  const downloadResult = tool.downloadResult;
 
   if (loading) {
     return (

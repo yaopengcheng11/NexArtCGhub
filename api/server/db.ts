@@ -160,22 +160,30 @@ export async function initDb() {
   }
   if (!userColNames.includes('createdAt')) {
     await db.exec(`ALTER TABLE users ADD COLUMN createdAt DATETIME`);
-    await db.run(
-      `UPDATE users SET createdAt = datetime('now') WHERE createdAt IS NULL`
-    );
   }
+  await db.run(
+    `UPDATE users
+       SET createdAt = COALESCE(createdAt, datetime('now'))
+     WHERE createdAt IS NULL`
+  );
   if (!userColNames.includes('creditsRemaining')) {
     await db.exec(`ALTER TABLE users ADD COLUMN creditsRemaining INTEGER`);
-    await db.run(
-      `UPDATE users SET creditsRemaining = 3 WHERE creditsRemaining IS NULL`
-    );
   }
+  // Backfill runs every boot (cheap once data is non-NULL) so a
+  // crashed mid-migration recovers on the next start.
+  await db.run(
+    `UPDATE users
+       SET creditsRemaining = COALESCE(creditsRemaining, 3)
+     WHERE creditsRemaining IS NULL`
+  );
   if (!userColNames.includes('creditsResetAt')) {
     await db.exec(`ALTER TABLE users ADD COLUMN creditsResetAt DATETIME`);
-    await db.run(
-      `UPDATE users SET creditsResetAt = datetime('now') WHERE creditsResetAt IS NULL`
-    );
   }
+  await db.run(
+    `UPDATE users
+       SET creditsResetAt = COALESCE(creditsResetAt, datetime('now'))
+     WHERE creditsResetAt IS NULL`
+  );
   if (!userColNames.includes('isSubscribed')) {
     await db.exec(`ALTER TABLE users ADD COLUMN isSubscribed INTEGER DEFAULT 0`);
   }
