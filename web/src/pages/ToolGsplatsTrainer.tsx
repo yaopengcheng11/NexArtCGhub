@@ -21,24 +21,6 @@ import { useToolRun } from '../hooks/useToolRun';
 
 type Downscale = 1 | 2 | 4;
 
-interface RunResult {
-  blob: Blob;
-  filename: string;
-  summary: {
-    ok: boolean;
-    project: string;
-    output_dir: string;
-    hip_path: string;
-    dataset_dir: string;
-    images_count: number;
-    node_paths: { top: string; geo: string };
-    cooked_top: string | null;
-    dry_run: boolean;
-    audit_md: string | null;
-  };
-  resultText: string;
-}
-
 export default function ToolGsplatsTrainer() {
   const { user, loading } = useAuth();
   const navigate = useNavigate();
@@ -57,16 +39,6 @@ export default function ToolGsplatsTrainer() {
       summary: 'X-Gsplats-Trainer-Summary',
       result: 'X-Gsplats-Trainer-Result',
       credits: 'X-Gsplats-Trainer-Credits',
-    },
-    buildFormData: (file, extras) => {
-      const fd = new FormData();
-      fd.append('file', file);
-      if (extras) {
-        for (const [k, v] of Object.entries(extras)) {
-          if (v !== undefined && v !== '') fd.append(k, v);
-        }
-      }
-      return fd;
     },
     defaultMessage: t('gsplats.resultDone'),
   });
@@ -668,16 +640,7 @@ function Segmented<V extends number>({
   );
 }
 
-function buildResultText(summary: RunResult['summary']): string {
-  return [
-    `Project            : ${summary.project}`,
-    `Output ($HIP)      : ${summary.output_dir || '(unknown)'}`,
-    `Dataset            : ${summary.dataset_dir || '(unknown)'}`,
-    `Houdini .hip       : ${summary.hip_path || '(unknown)'}`,
-    `Images copied      : ${summary.images_count}`,
-    `COLMAP             : ${summary.dry_run ? 'dry-run' : 'executed'}`,
-    `TOP cook triggered : ${summary.cooked_top || 'no'}`,
-    `Top node           : ${summary.node_paths.top || '?'}`,
-    `Sop node           : ${summary.node_paths.geo || '?'}`,
-  ].join('\n');
-}
+// buildResultText removed — the server always emits a clean RESULT
+// block via the X-Gsplats-Trainer-Result header (see useToolRun), so
+// the client never needs a fabricated fallback string. (Mirrors the
+// same cleanup done in ToolHipFormatBridge earlier.)

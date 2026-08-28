@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { CheckCircle2, Upload } from 'lucide-react';
+import { useToast } from '../Toast';
 
 interface FilePickerProps {
   label: string;
@@ -31,6 +32,7 @@ export function FilePicker({
   maxBytes,
 }: FilePickerProps) {
   const [dragging, setDragging] = useState(false);
+  const toast = useToast();
 
   const acceptFile = (f: File | null) => {
     if (!f) {
@@ -40,12 +42,12 @@ export function FilePicker({
     if (validate) {
       const err = validate(f);
       if (err) {
-        alert(err);
+        toast.error(err);
         return;
       }
     }
     if (maxBytes && f.size > maxBytes) {
-      alert(
+      toast.error(
         `File too large. Max ${(maxBytes / 1024 / 1024).toFixed(0)} MB.`
       );
       return;

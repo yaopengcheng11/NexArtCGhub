@@ -34,19 +34,25 @@ export interface RunResult<S = unknown> {
   message: string;
 }
 
-export interface UseToolRunOptions {
+export interface UseToolRunOptions<E extends Record<string, string> = Record<string, string>> {
   endpoint: string;
   /** Custom header names (different per tool). */
   headers: RunHeaders;
-  /** Build the FormData. Most callers only need the file + extra fields. */
-  buildFormData: (file: File, extras?: Record<string, string>) => FormData;
+  /**
+   * Build the FormData. Optional — the default appends the file under
+   * the key "file" plus every non-empty entry in `extras`. Override only
+   * if a tool needs custom field names or extra blobs.
+   */
+  buildFormData?: (file: File, extras?: E) => FormData;
   /** Long-running tool uploads deserve a bigger timeout. */
   timeoutMs?: number;
   /** Fallback message shown if the server doesn't return one. */
   defaultMessage: string;
 }
 
-export function useToolRun(opts: UseToolRunOptions) {
+export function useToolRun<E extends Record<string, string> = Record<string, string>>(
+  opts: UseToolRunOptions<E>
+) {
   const { user } = useAuth();
   const [credits, setCredits] = useState<number | null>(null);
   const [isSubscribed, setIsSubscribed] = useState(false);
@@ -136,7 +142,7 @@ export function useToolRun(opts: UseToolRunOptions) {
   }, [isSubscribed, credits]);
 
   const run = useCallback(
-    async (extras?: Record<string, string>) => {
+    async (extras?: E) => {
       if (!file) {
         setError('No file selected');
         return;
@@ -151,7 +157,19 @@ export function useToolRun(opts: UseToolRunOptions) {
       setResult(null);
       setRunning(true);
       try {
-        const form = opts.buildFormData(file, extras);
+        // Default builder: file + every non-empty extras entry. Only
+        // tools with custom field names override buildFormData.
+        const build = opts.buildFormData ?? ((f: File, ex?: E) => {
+          const fd = new FormData();
+          fd.append('file', f);
+          if (ex) {
+            for (const [k, v] of Object.entries(ex)) {
+              if (v !== undefined && v !== '') fd.append(k, v);
+            }
+          }
+          return fd;
+        });
+        const form = build(file, extras);
         const r = await fetch(opts.endpoint, {
           method: 'POST',
           body: form,

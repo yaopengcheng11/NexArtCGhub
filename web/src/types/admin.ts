@@ -11,7 +11,14 @@ export interface AdminResource {
   panCode?: string | null;
   downloadCount: number;
   createdAt: string;
-  tagGroups?: { software?: string[]; element?: string[]; technique?: string[] } | null;
+  /** Per-software tag group + optional render-engine override (the admin
+      edit form reads renderEngine from here and hoists it into the form). */
+  tagGroups?: {
+    software?: string[];
+    element?: string[];
+    technique?: string[];
+    renderEngine?: string;
+  } | null;
 }
 
 export interface AdminUser {

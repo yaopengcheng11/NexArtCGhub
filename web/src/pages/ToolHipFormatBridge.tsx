@@ -82,16 +82,6 @@ export default function ToolHipFormatBridge() {
       result: 'X-Format-Bridge-Result',
       credits: 'X-Format-Bridge-Credits',
     },
-    buildFormData: (file, extras) => {
-      const fd = new FormData();
-      fd.append('file', file);
-      if (extras) {
-        for (const [k, v] of Object.entries(extras)) {
-          if (v !== undefined && v !== '') fd.append(k, v);
-        }
-      }
-      return fd;
-    },
     defaultMessage: t('bridge.resultDone'),
   });
 

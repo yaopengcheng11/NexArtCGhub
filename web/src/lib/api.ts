@@ -21,10 +21,22 @@ export interface ApiFailure {
 }
 export type ApiResult<T> = ApiSuccess<T> | ApiFailure;
 
-// Helper: narrow an ApiResult<T> to its error side, so callers can
-// safely access .error / .status without TS complaining.
+// Helper: narrow an ApiResult<T> to its error side. Call this only in
+// the `!r.ok` branch — it's a type-level cast that relies on the caller
+// having already checked `ok`, but it keeps the guard in one place so
+// the error/status fields are accessible without spreading `as any`
+// around the codebase.
 export function failureOf<T>(r: ApiResult<T>): ApiFailure {
   return r as ApiFailure;
+}
+
+/**
+ * Runtime-safe variant: use this when the result may or may not be a
+ * failure without a preceding `if (!r.ok)` (e.g. inside a callback).
+ * Returns the error fields, or null for a success result.
+ */
+export function errorOf<T>(r: ApiResult<T>): { status: number; error: string; data?: any } | null {
+  return r.ok ? null : { status: r.status, error: r.error, data: r.data };
 }
 
 export class FetchError extends Error {

@@ -13,8 +13,24 @@ export default function Login() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
-  const { refresh } = useAuth();
+  const { user, loading, refresh } = useAuth();
   const { t } = useI18n();
+
+  // Already logged in? Bounce straight to the target instead of showing
+  // a form the user doesn't need.
+  useEffect(() => {
+    if (loading) return;
+    if (user) {
+      const state = location.state as { from?: string } | null;
+      const dest =
+        state?.from && state.from !== '/login'
+          ? state.from
+          : user.role === 'admin'
+            ? '/admin'
+            : '/';
+      navigate(dest, { replace: true });
+    }
+  }, [user, loading, location.state, navigate]);
 
   // If user just registered, prefill username + show a hint
   useEffect(() => {
@@ -41,16 +57,9 @@ export default function Login() {
       return;
     }
 
-    // /api/auth/login returns user directly in some versions; fall back
-    // to /me so we don't need a server change.
+    // refresh() loads the user into AuthContext; the already-logged-in
+    // effect above then navigates to the `from` target or the role home.
     await refresh();
-    const meRes = await apiFetch<{ user: { role: string } }>('/api/auth/me');
-    const role = meRes.ok ? meRes.data.user?.role : 'user';
-
-    // Honor a `from` redirect (set by ProtectedRoute) so deep links survive.
-    const state = location.state as { from?: string } | null;
-    const dest = state?.from && state.from !== '/login' ? state.from : role === 'admin' ? '/admin' : '/';
-    navigate(dest, { replace: true });
     setIsSubmitting(false);
   };
 

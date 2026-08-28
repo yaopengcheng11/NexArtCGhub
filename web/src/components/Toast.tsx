@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react';
 
 export type ToastKind = 'success' | 'error' | 'info';
@@ -18,8 +18,6 @@ interface ToastApi {
 
 const ToastContext = createContext<ToastApi | null>(null);
 
-let nextId = 1;
-
 /**
  * Lightweight global toast queue. The Provider sits inside the App
  * tree; components call useToast() to push messages. Toasts auto-dismiss
@@ -27,6 +25,13 @@ let nextId = 1;
  */
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
+  // Track auto-dismiss timers so we can clear them on unmount (a toast
+  // timer firing after the Provider unmounts — e.g. an ErrorBoundary
+  // replaced the tree — would call setState on an unmounted component).
+  const timersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  // Module-scoped counter shared across tests — move it into a ref so
+  // each Provider instance has its own, and tests don't collide.
+  const nextIdRef = useRef(1);
 
   const remove = useCallback((id: number) => {
     setItems((cur) => cur.filter((it) => it.id !== id));
@@ -34,12 +39,22 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
 
   const push = useCallback(
     (kind: ToastKind, message: string) => {
-      const id = nextId++;
+      const id = nextIdRef.current++;
       setItems((cur) => [...cur, { id, kind, message }]);
-      setTimeout(() => remove(id), 3500);
+      const timer = setTimeout(() => remove(id), 3500);
+      timersRef.current.add(timer);
     },
     [remove]
   );
+
+  // Clear pending timers on unmount (provider removed from the tree).
+  useEffect(() => {
+    const timers = timersRef.current;
+    return () => {
+      timers.forEach(clearTimeout);
+      timers.clear();
+    };
+  }, []);
 
   const api: ToastApi = {
     push,
@@ -89,6 +104,10 @@ function ToastView({ item, onClose }: { item: ToastItem; onClose: () => void }) 
   const Icon = c.Icon;
   return (
     <div
+      // Errors are assertive so assistive tech announces them promptly
+      // even if the user is mid-task (auto-dismiss 3.5s can otherwise
+      // beat the polite queue).
+      role={item.kind === 'error' ? 'alert' : undefined}
       className="flex items-start gap-2 rounded-2xl px-4 py-3 max-w-sm shadow-lg"
       style={{ background: c.bg, border: `1px solid ${c.fg}33`, color: c.fg }}
     >

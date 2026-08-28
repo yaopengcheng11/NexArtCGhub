@@ -37,10 +37,7 @@ export function formReducer(state: AdminResourceForm, action: FormAction): Admin
     case 'reset':
       return EMPTY_ADMIN_RESOURCE_FORM;
     case 'load': {
-      const tg = action.resource.tagGroups as
-        | { software?: string[]; element?: string[]; technique?: string[]; renderEngine?: string }
-        | null
-        | undefined;
+      const tg = action.resource.tagGroups;
       return {
         title: action.resource.title,
         description: action.resource.description,
@@ -212,14 +209,17 @@ function ResourcesTab() {
     if (!confirmDelete) return;
     const target = confirmDelete;
     setConfirmDelete(null);
+    // Optimistic: remove the row immediately, roll back on failure.
+    const previous = resources;
+    setResources((rs) => rs.filter((r) => r.id !== target.id));
     const r = await apiFetch(`/api/admin/resources/${target.id}`, { method: 'DELETE' });
     if (!r.ok) {
       const f = failureOf(r);
+      setResources(previous); // roll back
       toast.error(f.error || `Delete failed (${f.status})`);
       return;
     }
     toast.success(`Deleted "${target.title}"`);
-    fetchResources();
   };
 
   const openCreate = () => {

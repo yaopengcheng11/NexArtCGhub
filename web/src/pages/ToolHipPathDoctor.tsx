@@ -22,13 +22,6 @@ type Feature = 0 | 1 | 2 | 3;
 type Direction = 0 | 1;       // 0 = to absolute, 1 = to relative
 type Base = 0 | 1 | 2;         // 0 = $HIP, 1 = $JOB, 2 = Custom
 
-interface RunResult {
-  blob: Blob;
-  filename: string;
-  summary: { ok: boolean; feature: number; parms_changed: number; output_hip: string; audit_md: string | null };
-  resultText: string;
-}
-
 const FEATURE_META: {
   id: Feature;
   nameKey: string;
@@ -65,16 +58,6 @@ export default function ToolHipPathDoctor() {
       summary: 'X-Path-Doctor-Summary',
       result: 'X-Path-Doctor-Result',
       credits: 'X-Path-Doctor-Credits',
-    },
-    buildFormData: (file, extras) => {
-      const fd = new FormData();
-      fd.append('file', file);
-      if (extras) {
-        for (const [k, v] of Object.entries(extras)) {
-          if (v !== undefined && v !== '') fd.append(k, v);
-        }
-      }
-      return fd;
     },
     defaultMessage: t('tool.resultDone'),
   });
@@ -703,22 +686,7 @@ function Segmented<V extends number>({
   );
 }
 
-function buildResultText(
-  summary: { feature: number; parms_changed: number },
-  feature: Feature,
-): string {
-  // Use the same FEATURE_META mapping as above; we don't have t() here, so
-  // return English fallback. The server's X-Path-Doctor-Result header is
-  // always preferred, this only fires if the header is missing.
-  const NAME_MAP: Record<number, string> = {
-    0: 'Switch Slash',
-    1: 'Replace Path',
-    2: 'Find Missing',
-    3: 'Switch Abs / Rel',
-  };
-  const fname = NAME_MAP[summary.feature] ?? '?';
-  if (feature === 2) {
-    return 'Find Missing: scan complete.\n(see downloaded .hip for original, no changes written)';
-  }
-  return `${fname}: ${summary.parms_changed} parm(s) changed.`;
-}
+// buildResultText removed — the server always emits a clean RESULT
+// block via the X-Path-Doctor-Result header (see useToolRun), so the
+// client never needs a fabricated fallback string. (Mirrors the same
+// cleanup done in ToolHipFormatBridge earlier.)

@@ -132,6 +132,15 @@ export async function initDb() {
       FOREIGN KEY (resourceId) REFERENCES resources(id) ON DELETE CASCADE,
       UNIQUE(resourceId, collectionName)
     );
+
+    -- ===== Migration ledger (added 2026-08) =====
+    -- Records which additive migrations have been applied so we can
+    -- answer "is this DB at schema N?" without parsing PRAGMA output.
+    -- Each migration below INSERT OR IGNOREs its name after it runs.
+    CREATE TABLE IF NOT EXISTS _migrations (
+      name TEXT PRIMARY KEY,
+      appliedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   // ----- Indexes -----
@@ -197,6 +206,45 @@ export async function initDb() {
     await db.exec(`ALTER TABLE payments ADD COLUMN currency TEXT DEFAULT 'usd'`);
     await db.run(`UPDATE payments SET currency = 'usd' WHERE currency IS NULL`);
   }
+  // payments.userId originally had no FK (a user could be deleted and
+  // leave orphan payments). SQLite can't ALTER-add a FK — rebuild the
+  // table preserving data + the UNIQUE(providerSessionId) constraint.
+  // (Checked by presence of the _migrations ledger so this only runs
+  // once on old DBs.)
+  const paymentsFkMigrated = await db.get(
+    `SELECT name FROM _migrations WHERE name = 'add_payments_userId_fk'`
+  );
+  if (!paymentsFkMigrated) {
+    await db.exec(`
+      PRAGMA foreign_keys = OFF;
+      BEGIN IMMEDIATE;
+      CREATE TABLE payments_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        userId INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('credits', 'hda')),
+        tier TEXT,
+        amountCents INTEGER NOT NULL,
+        currency TEXT NOT NULL DEFAULT 'usd',
+        creditsAdded INTEGER DEFAULT 0,
+        hdaLicenseKey TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed', 'failed', 'refunded')),
+        provider TEXT DEFAULT 'stripe',
+        providerSessionId TEXT UNIQUE,
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        completedAt DATETIME,
+        FOREIGN KEY (userId) REFERENCES users(id) ON DELETE SET NULL
+      );
+      INSERT INTO payments_new (id, userId, kind, tier, amountCents, currency, creditsAdded, hdaLicenseKey, status, provider, providerSessionId, createdAt, completedAt)
+        SELECT id, userId, kind, tier, amountCents, currency, creditsAdded, hdaLicenseKey, status, provider, providerSessionId, createdAt, completedAt FROM payments;
+      DROP TABLE payments;
+      ALTER TABLE payments_new RENAME TO payments;
+      COMMIT;
+      PRAGMA foreign_keys = ON;
+    `);
+    await db.run(
+      `INSERT OR IGNORE INTO _migrations (name) VALUES ('add_payments_userId_fk')`
+    );
+  }
   if (!resourceColNames.includes('tagGroups')) {
     await db.exec(`ALTER TABLE resources ADD COLUMN tagGroups TEXT`);
     // Backfill from legacy category + tags columns.
@@ -240,8 +288,14 @@ export async function initDb() {
   const SUPER_ADMIN_EMAIL = process.env.SUPER_ADMIN_EMAIL;
   const SUPER_ADMIN_PASSWORD = process.env.SUPER_ADMIN_PASSWORD;
   if (SUPER_ADMIN_EMAIL && SUPER_ADMIN_PASSWORD) {
+    // Only skip the seed if a real ADMIN with this identity already
+    // exists. (A plain 'user' row sharing the username/email must NOT
+    // suppress admin creation — otherwise an operator rotating the
+    // SUPER_ADMIN_EMAIL would silently end up with zero admins.)
     const existingSuper = await db.get(
-      `SELECT id FROM users WHERE username = ? OR email = ? LIMIT 1`,
+      `SELECT id FROM users
+        WHERE (username = ? OR email = ?) AND role = 'admin'
+        LIMIT 1`,
       [SUPER_ADMIN_EMAIL, SUPER_ADMIN_EMAIL]
     );
     if (!existingSuper) {
@@ -259,6 +313,22 @@ export async function initDb() {
         'Set them in api/.env to enable admin sign-in.'
     );
   }
+
+  // Mark the migration ledger entries for the additive migrations
+  // above (all run before this point).
+  await db.run(
+    `INSERT OR IGNORE INTO _migrations (name) VALUES (?), (?), (?), (?), (?), (?), (?), (?)`,
+    [
+      'add_users_credits_columns',
+      'add_resources_tagGroups_panCode',
+      'add_payments_currency',
+      'add_webhook_events',
+      'add_indexes',
+      'add_pragmas',
+      'add_admin_env_seed',
+      'add_collection_share_links',
+    ]
+  );
 
   // ===== Seed some initial data for visual testing if DB is empty =====
   const resourceCount = await db.get('SELECT COUNT(*) as count FROM resources');

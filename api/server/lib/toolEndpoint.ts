@@ -22,6 +22,7 @@ import crypto from 'crypto';
 import { spawn } from 'child_process';
 import multer from 'multer';
 import type { Request, Response } from 'express';
+import { buildZip } from './zip.js';
 
 export interface ToolEndpointSpec {
   /** Route name — used for tmp dir, error messages, header prefixes. */
@@ -57,6 +58,14 @@ export interface ToolEndpointSpec {
     result: string;
     credits: string;
   };
+  /**
+   * Subprocess watchdog in ms. Default 10 min. hip-path-doctor is
+   * sub-second; gsplats-trainer runs COLMAP and can legitimately take
+   * longer — set per tool, not one-size-fits-all.
+   */
+  timeoutMs?: number;
+  /** Max captured stdout bytes before we kill the child. Default 50 MB. */
+  maxStdoutBytes?: number;
 }
 
 export interface ToolRunContext {
@@ -259,7 +268,7 @@ export function createToolEndpoint(spec: ToolEndpointSpec) {
         // ran to its conclusion (or got stuck). Charging is correct.
         rmDirSafe(tmpDir);
       });
-    }, 10 * 60 * 1000);
+    }, spec.timeoutMs ?? 10 * 60 * 1000);
 
     // Client disconnect: even if hython is happily producing output,
     // the receiver went away. Kill the subprocess so we don't waste
@@ -277,7 +286,8 @@ export function createToolEndpoint(spec: ToolEndpointSpec) {
 
     child.stdout.on('data', (b: Buffer) => {
       stdoutBytes += b.length;
-      if (stdoutBytes > 50 * 1024 * 1024) {
+      const maxBytes = spec.maxStdoutBytes ?? 50 * 1024 * 1024;
+      if (stdoutBytes > maxBytes) {
         // Tool is misbehaving (or the user uploaded a 200MB .blend that
         // produces megabytes of stdout). Kill and report — don't pretend
         // it succeeded.
@@ -414,91 +424,4 @@ function rmDirSafe(dir: string) {
   try {
     if (dir && fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   } catch { /* ignore */ }
-}
-
-// Inlined minimal zip writer (STORE, no compression) — keeps the helper
-// self-contained. Same format as server.ts's buildZip but kept here
-// so createToolEndpoint has no dependency on server.ts internals.
-function buildZip(parts: { name: string; data: Buffer }[]): Buffer {
-  const now = new Date();
-  const time =
-    ((now.getHours() & 0x1f) << 11) |
-    ((now.getMinutes() & 0x3f) << 5) |
-    ((now.getSeconds() >> 1) & 0x1f);
-  const date =
-    (((now.getFullYear() - 1980) & 0x7f) << 9) |
-    (((now.getMonth() + 1) & 0x0f) << 5) |
-    (now.getDate() & 0x1f);
-
-  const localChunks: Buffer[] = [];
-  const entries: Array<{ name: string; data: Buffer; crc: number; size: number; offset: number }> = [];
-  let cursor = 0;
-  for (const part of parts) {
-    const nameBuf = Buffer.from(part.name, 'utf-8');
-    const data = part.data;
-    const crc = crc32(data);
-    const lfh = Buffer.alloc(30);
-    lfh.writeUInt32LE(0x04034b50, 0);
-    lfh.writeUInt16LE(20, 4);
-    lfh.writeUInt16LE(0x0800, 6);
-    lfh.writeUInt16LE(0, 8);
-    lfh.writeUInt16LE(time, 10);
-    lfh.writeUInt16LE(date, 12);
-    lfh.writeUInt32LE(crc, 14);
-    lfh.writeUInt32LE(data.length, 18);
-    lfh.writeUInt32LE(data.length, 22);
-    lfh.writeUInt16LE(nameBuf.length, 26);
-    lfh.writeUInt16LE(0, 28);
-    const buf = Buffer.concat([lfh, nameBuf, data]);
-    entries.push({ name: part.name, data, crc, size: data.length, offset: cursor });
-    localChunks.push(buf);
-    cursor += buf.length;
-  }
-  const cdChunks: Buffer[] = [];
-  let cdSize = 0;
-  for (const e of entries) {
-    const nameBuf = Buffer.from(e.name, 'utf-8');
-    const cd = Buffer.alloc(46);
-    cd.writeUInt32LE(0x02014b50, 0);
-    cd.writeUInt16LE(20, 4);
-    cd.writeUInt16LE(20, 6);
-    cd.writeUInt16LE(0, 8);
-    cd.writeUInt16LE(0, 10);
-    cd.writeUInt16LE(time, 12);
-    cd.writeUInt16LE(date, 14);
-    cd.writeUInt32LE(e.crc, 16);
-    cd.writeUInt32LE(e.size, 20);
-    cd.writeUInt32LE(e.size, 24);
-    cd.writeUInt16LE(nameBuf.length, 28);
-    cd.writeUInt16LE(0, 30);
-    cd.writeUInt16LE(0, 32);
-    cd.writeUInt16LE(0, 34);
-    cd.writeUInt16LE(0, 36);
-    cd.writeUInt32LE(0, 38);
-    cd.writeUInt32LE(e.offset, 42);
-    const cdBuf = Buffer.concat([cd, nameBuf]);
-    cdChunks.push(cdBuf);
-    cdSize += cdBuf.length;
-  }
-  const cdOffset = cursor;
-  const eocd = Buffer.alloc(22);
-  eocd.writeUInt32LE(0x06054b50, 0);
-  eocd.writeUInt16LE(0, 4);
-  eocd.writeUInt16LE(0, 6);
-  eocd.writeUInt16LE(entries.length, 8);
-  eocd.writeUInt16LE(entries.length, 10);
-  eocd.writeUInt32LE(cdSize, 12);
-  eocd.writeUInt32LE(cdOffset, 16);
-  eocd.writeUInt16LE(0, 20);
-  return Buffer.concat([...localChunks, ...cdChunks, eocd]);
-}
-
-function crc32(buf: Buffer): number {
-  let c = 0xFFFFFFFF >>> 0;
-  for (let i = 0; i < buf.length; i++) {
-    const byte = buf[i] ?? 0;
-    c = c ^ byte;
-    for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xEDB88320 & -(c & 1));
-  }
-  return (c ^ 0xFFFFFFFF) >>> 0;
 }

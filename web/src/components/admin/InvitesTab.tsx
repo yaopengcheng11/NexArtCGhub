@@ -39,14 +39,17 @@ export function InvitesTab() {
     if (!confirmRevoke) return;
     const target = confirmRevoke;
     setConfirmRevoke(null);
+    // Optimistic: remove the row immediately, roll back on failure.
+    const previous = invites;
+    setInvites((cur) => cur.filter((inv) => inv.id !== target.id));
     const r = await apiFetch(`/api/admin/invites/${target.id}`, { method: 'DELETE' });
     if (!r.ok) {
-      toast.error(failureOf(r).error || `Revoke failed (${failureOf(r).status})`);
-      fetchInvites(); // refresh so the row reappears in the table
+      const f = failureOf(r);
+      setInvites(previous); // roll back
+      toast.error(f.error || `Revoke failed (${f.status})`);
       return;
     }
     toast.success('Invite revoked');
-    fetchInvites();
   };
 
   const copyLink = async (code: string, id: number) => {

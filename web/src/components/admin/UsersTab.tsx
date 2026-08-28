@@ -39,14 +39,17 @@ export function UsersTab({ currentUserId }: UsersTabProps) {
     if (!confirmDelete) return;
     const target = confirmDelete;
     setConfirmDelete(null);
+    // Optimistic: remove the row immediately, roll back on failure.
+    const previous = users;
+    setUsers((cur) => cur.filter((u) => u.id !== target.id));
     const r = await apiFetch(`/api/admin/users/${target.id}`, { method: 'DELETE' });
     if (!r.ok) {
       const f = failureOf(r);
+      setUsers(previous); // roll back
       toast.error(f.error || `Delete failed (${f.status})`);
       return;
     }
     toast.success(`Deleted ${target.username}`);
-    fetchUsers();
   };
 
   return (

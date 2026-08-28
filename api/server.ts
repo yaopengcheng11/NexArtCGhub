@@ -13,6 +13,7 @@ import {
   makeToolUpload,
   type ToolEndpointSpec,
 } from './server/lib/toolEndpoint.js';
+import { buildZip } from './server/lib/zip.js';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -268,131 +269,6 @@ const HDA_FILE_PATH = process.env.HDA_FILE_PATH ||
 const DOWNLOAD_SIGN_SECRET = process.env.DOWNLOAD_SIGN_SECRET || JWT_SIGNING_KEY;
 
 const IS_PROD = process.env.NODE_ENV === 'production';
-
-// =====================================================================
-// Minimal ZIP writer (STORE / no-compression).
-// We use this instead of the `archiver` package because npm registry
-// is sometimes unreachable in this environment, and our payload is
-// already-compressed .hip + tiny .md so deflate wouldn't help much.
-// Format spec: PKWARE APPNOTE 6.3.x — Local file header + Central dir +
-// EOCD. All multi-byte values are little-endian.
-// =====================================================================
-function crc32(buf: Buffer): number {
-  // Standard IEEE 802.3 CRC-32 (polynomial 0xEDB88320), one-pass table-less
-  // implementation. Fast enough for typical .hip + .md sizes (< 100 MB).
-  let c = 0xFFFFFFFF >>> 0;
-  for (let i = 0; i < buf.length; i++) {
-    const byte = buf[i] ?? 0;
-    c = c ^ byte;
-    for (let k = 0; k < 8; k++) {
-      c = (c >>> 1) ^ (0xEDB88320 & -(c & 1));
-    }
-  }
-  return (c ^ 0xFFFFFFFF) >>> 0;
-}
-
-interface ZipEntry {
-  name: string;          // utf-8 filename inside the zip
-  data: Buffer;          // file contents
-  crc: number;           // crc32 of data
-  size: number;          // uncompressed size
-  offset: number;        // offset of the local header in the final blob
-  dosTime: number;       // MS-DOS time stamp
-  dosDate: number;       // MS-DOS date stamp
-}
-
-function dosTimeDate(d = new Date()): { time: number; date: number } {
-  const time = ((d.getHours() & 0x1f) << 11) |
-               ((d.getMinutes() & 0x3f) << 5) |
-               ((d.getSeconds() >> 1) & 0x1f);
-  const date = (((d.getFullYear() - 1980) & 0x7f) << 9) |
-               (((d.getMonth() + 1) & 0x0f) << 5) |
-               (d.getDate() & 0x1f);
-  return { time, date };
-}
-
-/**
- * Build a single-blob ZIP archive (STORE method, no compression) from a
- * list of {name, data} entries. Returns the archive as a Buffer.
- */
-function buildZip(parts: { name: string; data: Buffer }[]): Buffer {
-  const { time, date } = dosTimeDate();
-  const entries: ZipEntry[] = [];
-  const localChunks: Buffer[] = [];
-  let cursor = 0;
-  for (const part of parts) {
-    const nameBuf = Buffer.from(part.name, 'utf-8');
-    const data = part.data;
-    const crc = crc32(data);
-    const size = data.length;
-    // Local file header (30 bytes + name)
-    const lfh = Buffer.alloc(30);
-    lfh.writeUInt32LE(0x04034b50, 0);    // signature
-    lfh.writeUInt16LE(20, 4);             // version needed
-    lfh.writeUInt16LE(0x0800, 6);         // general purpose: utf-8 name
-    lfh.writeUInt16LE(0, 8);              // method: 0 = STORE
-    lfh.writeUInt16LE(time, 10);          // last mod time
-    lfh.writeUInt16LE(date, 12);          // last mod date
-    lfh.writeUInt32LE(crc, 14);           // crc32
-    lfh.writeUInt32LE(size, 18);          // compressed size (= uncompressed for STORE)
-    lfh.writeUInt32LE(size, 22);          // uncompressed size
-    lfh.writeUInt16LE(nameBuf.length, 26);// file name length
-    lfh.writeUInt16LE(0, 28);             // extra field length
-    const lfhBuf = Buffer.concat([lfh, nameBuf, data]);
-    entries.push({
-      name: part.name,
-      data,
-      crc,
-      size,
-      offset: cursor,
-      dosTime: time,
-      dosDate: date,
-    });
-    localChunks.push(lfhBuf);
-    cursor += lfhBuf.length;
-  }
-
-  // Central directory entries (one per file, 46 bytes + name + extra)
-  const cdChunks: Buffer[] = [];
-  let cdSize = 0;
-  for (const e of entries) {
-    const nameBuf = Buffer.from(e.name, 'utf-8');
-    const cdh = Buffer.alloc(46);
-    cdh.writeUInt32LE(0x02014b50, 0);     // signature
-    cdh.writeUInt16LE(20, 4);             // version made by
-    cdh.writeUInt16LE(20, 6);             // version needed
-    cdh.writeUInt16LE(0x0800, 8);         // general purpose: utf-8 name
-    cdh.writeUInt16LE(0, 10);            // method
-    cdh.writeUInt16LE(e.dosTime, 12);    // time
-    cdh.writeUInt16LE(e.dosDate, 14);    // date
-    cdh.writeUInt32LE(e.crc, 16);        // crc32
-    cdh.writeUInt32LE(e.size, 20);        // compressed
-    cdh.writeUInt32LE(e.size, 24);        // uncompressed
-    cdh.writeUInt16LE(nameBuf.length, 28);
-    cdh.writeUInt16LE(0, 30);            // extra field length
-    cdh.writeUInt16LE(0, 32);            // comment length
-    cdh.writeUInt16LE(0, 34);            // disk number
-    cdh.writeUInt16LE(0, 36);            // internal attrs
-    cdh.writeUInt32LE(0, 38);            // external attrs
-    cdh.writeUInt32LE(e.offset, 42);     // local header offset
-    const cdhBuf = Buffer.concat([cdh, nameBuf]);
-    cdChunks.push(cdhBuf);
-    cdSize += cdhBuf.length;
-  }
-
-  // EOCD (End of central directory record, 22 bytes)
-  const eocd = Buffer.alloc(22);
-  eocd.writeUInt32LE(0x06054b50, 0);
-  eocd.writeUInt16LE(0, 4);               // disk number
-  eocd.writeUInt16LE(0, 6);               // start disk
-  eocd.writeUInt16LE(entries.length, 8);  // # entries on this disk
-  eocd.writeUInt16LE(entries.length, 10); // # total entries
-  eocd.writeUInt32LE(cdSize, 12);         // central dir size
-  eocd.writeUInt32LE(cursor, 16);         // central dir offset
-  eocd.writeUInt16LE(0, 20);              // comment length
-
-  return Buffer.concat([...localChunks, ...cdChunks, eocd]);
-}
 
 // JSON parse helper that returns null on failure instead of throwing
 function safeJson(s: string | null | undefined): any {
@@ -662,6 +538,23 @@ async function startServer() {
       if (!user) return res.status(401).json({ error: 'Invalid credentials' });
       const ok = await bcrypt.compare(password, user.password || '');
       if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
+      // Transparently upgrade legacy bcrypt hashes (cost 10 from before
+      // the security pass) to cost 12 on successful login. Costs ~250ms
+      // once per account; older hashes are 4x faster to crack.
+      try {
+        const rounds = bcrypt.getRounds(user.password || '');
+        if (rounds < 12) {
+          const upgraded = await bcrypt.hash(password, 12);
+          await db.run(
+            `UPDATE users SET password = ? WHERE id = ?`,
+            [upgraded, user.id]
+          );
+        }
+      } catch {
+        // getRounds can throw if password hash is malformed — keep the
+        // login working, log and move on.
+        console.warn(`[auth/login] could not upgrade hash for user ${user.id}`);
+      }
       const token = jwt.sign(
         { id: user.id, username: user.username, role: user.role },
         JWT_SIGNING_KEY,
@@ -967,10 +860,7 @@ async function startServer() {
   });
 
   // ----- Admin: grant credits to a user (for testing / manual comps) -----
-  app.post('/api/admin/credits/grant', requireAuth, async (req: any, res: any) => {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'admin_only' });
-    }
+  app.post('/api/admin/credits/grant', requireAuth, requireAdmin, async (req: any, res: any) => {
     const userId = Number(req.body?.userId);
     const delta = Number(req.body?.delta || 0);
     if (!userId || !delta) {
@@ -990,10 +880,7 @@ async function startServer() {
 
   // ----- Admin: list users with credit balance (lightweight, for the
   // admin dashboard so we can grant/test without a DB client) -----
-  app.get('/api/admin/credits/users', requireAuth, async (req: any, res: any) => {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'admin_only' });
-    }
+  app.get('/api/admin/credits/users', requireAuth, requireAdmin, async (req: any, res: any) => {
     const rows: any[] = await db.all(
       `SELECT id, username, email, role, creditsRemaining, creditsResetAt, isSubscribed
        FROM users ORDER BY id`
@@ -1318,7 +1205,6 @@ async function startServer() {
             console.error('[blend-asset] both extract methods failed:', e2?.message);
             return res.status(500).json({
               error: 'texture_zip_extract_failed',
-              detail: e2?.message,
               resourceId,
             });
           }
@@ -1353,7 +1239,8 @@ async function startServer() {
           });
         }
       } catch (e: any) {
-        return res.status(500).json({ error: 'fixer_spawn_failed', detail: e?.message, resourceId });
+        console.error('[blend-asset] fixer failed:', e?.message);
+        return res.status(500).json({ error: 'fixer_spawn_failed', resourceId });
       }
 
       // 2) Run parser on the fixed blend so the manifest matches the
@@ -1376,7 +1263,8 @@ async function startServer() {
           });
         }
       } catch (e: any) {
-        return res.status(500).json({ error: 'parser_spawn_failed', detail: e?.message, resourceId });
+        console.error('[blend-asset] parser failed:', e?.message);
+        return res.status(500).json({ error: 'parser_spawn_failed', resourceId });
       }
 
       // 3) Build the manifest summary the frontend will render, and
@@ -1579,10 +1467,10 @@ async function startServer() {
               });
             }
           } catch (e: any) {
+            console.error('[blend-asset] extractor failed:', e?.message);
             return res.status(500).json({
               error: 'extractor_spawn_failed',
               asset: aid,
-              detail: e?.message,
             });
           }
         }
@@ -2072,6 +1960,10 @@ async function startServer() {
       const projectName = String(ctx.req.body?.project_name ?? '').trim();
       return path.join(ctx.tmpDir, `${projectName}_NexArt_gsplatstrainer.md`);
     },
+    // COLMAP sparse reconstruction is genuinely long — allow 30 min
+    // (hip-path-doctor is sub-second, format-bridge a few minutes).
+    timeoutMs: 30 * 60 * 1000,
+    maxStdoutBytes: 100 * 1024 * 1024,
   };
 
   app.post(
@@ -2111,10 +2003,21 @@ async function startServer() {
   }
 
   // ----- Global error middleware (must be last) -----
-  // Catches anything that escapes an async handler. Logs full stack but
-  // returns a generic message — never leaks file paths or SQL fragments.
+  // Catches anything that escapes an async handler. Logs the message but
+  // redacts secrets from the URL (single-use download tokens, HMAC sigs,
+  // Stripe session ids) and never leaks a full stack in production.
   app.use((err: any, req: any, res: any, next: any) => {
-    console.error('[api]', req.method, req.url, err);
+    const redactedUrl = String(req.url || '').replace(
+      /(token|sig|session_id|code|key)=[^&]+/gi,
+      '$1=REDACTED'
+    );
+    if (IS_PROD) {
+      // Prod: message only (no stack — stack traces can embed file
+      // paths / secrets / dependency versions).
+      console.error('[api]', req.method, redactedUrl, err?.message || err);
+    } else {
+      console.error('[api]', req.method, redactedUrl, err);
+    }
     if (res.headersSent) {
       return next(err);
     }

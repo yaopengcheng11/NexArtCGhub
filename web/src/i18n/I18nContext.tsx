@@ -14,7 +14,10 @@ const dictionaries: Record<Locale, Record<DictKey, string>> = { en, zh };
 // above (which already enforces parity at compile time), but we keep
 // the runtime warning as a safety net for cases where a key is added to
 // en.ts with the value `undefined` or `''`.
-if (typeof window !== 'undefined') {
+// Dev-only: this scans both dicts every page load; in production the
+// TS constraint (Record<DictKey, string>) already guarantees parity at
+// build time, so the runtime scan is dead weight.
+if (typeof window !== 'undefined' && import.meta.env?.DEV) {
   const enKeys = Object.keys(en) as DictKey[];
   const zhKeys = new Set(Object.keys(zh));
   const onlyEn: DictKey[] = enKeys.filter((k) => !zhKeys.has(k));
