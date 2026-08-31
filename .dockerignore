@@ -1,0 +1,38 @@
+# 依赖
+node_modules/
+web/node_modules/
+api/node_modules/
+
+# 构建产物(web 在 Dockerfile 内重新构建,不要预生成的 dist)
+web/dist/
+api/data/database.sqlite
+api/data/database.sqlite-*
+
+# 运行时缓存 / 开发产物
+.cbmm-cache/
+.thumb-cache/
+cache/
+data/tools_uploads/
+data/test_manifest/
+data/blend_assets/
+test_fixtures/
+scripts/baidu_pan/
+
+# 部署脚本(仅 Windows 本地用)
+_legacy_root_backup/
+
+# 杂项
+*.log
+.env
+.env.local
+.env.*.local
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.git/
+README.html
+.shares_map.json
+bake_run.log
+bake_white_lion.py
+_api_notes/

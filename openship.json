@@ -1,0 +1,11 @@
+{
+  "framework": "docker",
+  "rootDirectory": ".",
+  "port": 8788,
+  "volumes": [
+    "/app/api/data"
+  ],
+  "env": {
+    "NODE_ENV": "production"
+  }
+}
