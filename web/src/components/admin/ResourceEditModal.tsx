@@ -2,6 +2,9 @@ import React from 'react';
 import { X } from 'lucide-react';
 import {
   ADMIN_CATEGORIES,
+  ADMIN_LICENSES,
+  ADMIN_LANGUAGES,
+  ADMIN_RESOURCE_TYPES,
   ADMIN_TAG_POOLS,
   type AdminResourceForm,
   type AdminTagCategory,
@@ -180,6 +183,72 @@ export function ResourceEditModal({
                 className="w-full px-4 py-3 text-sm outline-none"
                 style={inputStyle}
               />
+            </Field>
+          </div>
+
+          {/* ─── Taxonomy: required selects + optional language ─── */}
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="资源类型 *">
+              <select
+                required
+                value={formData.resType}
+                onChange={(e) => update('resType', e.target.value)}
+                className="w-full px-4 py-3 text-sm outline-none"
+                style={inputStyle}
+              >
+                <option value="">— 请选择 —</option>
+                {ADMIN_RESOURCE_TYPES.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="许可协议 *">
+              <select
+                required
+                value={formData.license}
+                onChange={(e) => update('license', e.target.value)}
+                className="w-full px-4 py-3 text-sm outline-none"
+                style={inputStyle}
+              >
+                <option value="">— 请选择 —</option>
+                {ADMIN_LICENSES.map((l) => (
+                  <option key={l} value={l}>
+                    {l}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="免费 / 付费 *">
+              <select
+                required
+                value={formData.isFree ? '1' : '0'}
+                onChange={(e) => update('isFree', e.target.value === '1')}
+                className="w-full px-4 py-3 text-sm outline-none"
+                style={inputStyle}
+              >
+                <option value="1">免费</option>
+                <option value="0">付费</option>
+              </select>
+            </Field>
+            <Field label="语言（可选）">
+              <select
+                value={formData.language}
+                onChange={(e) => update('language', e.target.value)}
+                className="w-full px-4 py-3 text-sm outline-none"
+                style={inputStyle}
+              >
+                <option value="">— 未指定 —</option>
+                {ADMIN_LANGUAGES.map((l) => (
+                  <option key={l} value={l}>
+                    {l}
+                  </option>
+                ))}
+              </select>
             </Field>
           </div>
 

@@ -279,4 +279,37 @@ export const zh: Record<DictKey, string> = {
   'gsplats.resultRedownload': '重新下载',
   'gsplats.resultDryRunNote': 'Dry-run 模式:sparse/0/ 是占位文件,取消勾选 Dry-run 重新跑即可生成真实 COLMAP 输出。',
   'gsplats.backToResources': '资源',
+
+  // ====== Taxonomy: filters & badges (Home / Detail) ======
+  'home.filterCategory': '软件',
+  'home.filterType': '类型',
+  'home.filterPrice': '价格',
+  'home.filterSort': '排序',
+  'home.sortNew': '最新',
+  'home.sortDownloads': '最多下载',
+  'home.filterClear': '清除',
+  'home.filterEmpty': '没有符合条件的资源',
+  'home.badgeFree': '免费',
+  'home.badgePaid': '付费',
+
+  // ====== Taxonomy: resource types ======
+  'resourceType.plugin': '插件 / 脚本',
+  'resourceType.preset': '预设 / 模板',
+  'resourceType.material': '材质 / 贴图',
+  'resourceType.model': '模型 / 资产',
+  'resourceType.project': '工程文件',
+  'resourceType.tutorial': '教程 / 文档',
+  'resourceType.aiworkflow': 'AI 工作流包',
+  'resourceType.audio': '音效 / 音乐',
+
+  // ====== Taxonomy: licenses ======
+  'license.cc0': 'CC0',
+  'license.mit': 'MIT',
+  'license.gpl': 'GPL',
+  'license.commercial': '商业许可',
+
+  // ====== Taxonomy: languages ======
+  'language.zh': '中文',
+  'language.en': '英文',
+  'language.localized': '汉化',
 };

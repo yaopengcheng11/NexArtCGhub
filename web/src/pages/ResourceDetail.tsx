@@ -61,6 +61,11 @@ interface Resource {
   panCode?: string | null;
   downloadCount: number;
   createdAt: string;
+  // Taxonomy (资源分类体系) — optional, absent on legacy rows pre-backfill
+  resType?: string | null;
+  license?: string | null;
+  language?: string | null;
+  isFree?: number | null;
   // Future content fields (optional; placeholders used when absent)
   videoUrl?: string;
   screenshots?: string[];
@@ -699,7 +704,7 @@ function ScreenshotsLightbox({
 export default function ResourceDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { t, locale } = useI18n();
+  const { t } = useI18n();
   const [resource, setResource] = useState<Resource | null>(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
@@ -707,8 +712,15 @@ export default function ResourceDetail() {
   useEffect(() => {
     setLoading(true);
     setNotFound(false);
+    // Guard against stale responses: if the user navigates from
+    // /resource/1 to /resource/2 while request 1 is still in flight, the
+    // cleanup flips `active` and request 1's handlers no-op. Without this
+    // the old resource could overwrite the new one (or its finally could
+    // clear loading for the wrong request).
+    let active = true;
     fetch(`/api/resources/${id}`)
       .then((r) => {
+        if (!active) return null;
         if (r.status === 404) {
           setNotFound(true);
           return null;
@@ -717,6 +729,7 @@ export default function ResourceDetail() {
         return r.json();
       })
       .then((data) => {
+        if (!active) return;
         if (data) {
           // tagGroups is stored as a JSON string in SQLite and the
           // server returns it raw — parse it so type guards like
@@ -729,10 +742,16 @@ export default function ResourceDetail() {
         }
       })
       .catch((err) => {
+        if (!active) return;
         console.error(err);
         setNotFound(true);
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
   }, [id]);
 
   const handleDownload = (e?: React.MouseEvent) => {
@@ -798,25 +817,13 @@ export default function ResourceDetail() {
   // Parse tags (JSON string or comma-separated fallback)
   let parsedTags: string[] = [];
   try {
-    parsedTags = JSON.parse(resource.tags);
+    const parsed = JSON.parse(resource.tags);
+    // Valid JSON that isn't an array (null, object) would crash the
+    // .map()/.slice() below — treat it as "no tags".
+    parsedTags = Array.isArray(parsed) ? parsed : [];
   } catch {
     parsedTags = resource.tags ? resource.tags.split(',') : [];
   }
-
-  // Format date for display
-  const formattedDate = (() => {
-    try {
-      const d = new Date(resource.createdAt);
-      if (isNaN(d.getTime())) return resource.createdAt;
-      return d.toLocaleDateString(locale === 'zh' ? 'zh-CN' : 'en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-      });
-    } catch {
-      return resource.createdAt;
-    }
-  })();
 
   // Content data with fallbacks. For blend assets, generate
   // data-driven highlights from the manifest (asset count, tri count,
@@ -902,7 +909,7 @@ export default function ResourceDetail() {
         </h1>
 
         <p
-          className="text-sm italic mb-10"
+          className="text-sm italic mb-6"
           style={{
             color: 'var(--color-fg-muted)',
             fontFamily: 'var(--font-display)',
@@ -913,6 +920,60 @@ export default function ResourceDetail() {
             ? t('detail.categoryUnreal')
             : t('detail.categoryResource', { category: resource.category })}
         </p>
+
+        {/* Taxonomy chips: 免费/付费 + 类型 + 许可 + 语言 (hidden when unset) */}
+        {(resource.isFree !== undefined && resource.isFree !== null) ||
+        resource.resType ||
+        resource.license ||
+        resource.language ? (
+          <div className="flex items-center gap-2 flex-wrap mb-10">
+            {resource.isFree !== undefined && resource.isFree !== null && (
+              <span
+                className="text-[10px] uppercase tracking-[0.18em] px-3 py-1 rounded-full"
+                style={{
+                  color: resource.isFree ? '#4a7c59' : 'var(--color-fg)',
+                  fontFamily: 'var(--font-mono)',
+                  background: resource.isFree ? 'rgba(74, 124, 89, 0.10)' : 'rgba(168, 128, 107, 0.12)',
+                }}
+              >
+                {resource.isFree ? t('home.badgeFree') : t('home.badgePaid')}
+              </span>
+            )}
+            {resource.resType && (
+              <span
+                className="text-[10px] uppercase tracking-[0.18em] px-3 py-1 rounded-full"
+                style={{
+                  color: 'var(--color-fg-soft)', fontFamily: 'var(--font-mono)',
+                  background: 'rgba(26, 24, 20, 0.04)',
+                }}
+              >
+                {t(`resourceType.${resource.resType}`)}
+              </span>
+            )}
+            {resource.license && (
+              <span
+                className="text-[10px] uppercase tracking-[0.18em] px-3 py-1 rounded-full"
+                style={{
+                  color: 'var(--color-fg-soft)', fontFamily: 'var(--font-mono)',
+                  background: 'rgba(26, 24, 20, 0.04)',
+                }}
+              >
+                {t(`license.${resource.license}`)}
+              </span>
+            )}
+            {resource.language && (
+              <span
+                className="text-[10px] uppercase tracking-[0.18em] px-3 py-1 rounded-full"
+                style={{
+                  color: 'var(--color-fg-soft)', fontFamily: 'var(--font-mono)',
+                  background: 'rgba(26, 24, 20, 0.04)',
+                }}
+              >
+                {t(`language.${resource.language}`)}
+              </span>
+            )}
+          </div>
+        ) : null}
 
         <hr className="my-10" style={{ borderColor: 'rgba(26, 24, 20, 0.08)' }} />
 
@@ -1100,57 +1161,6 @@ export default function ResourceDetail() {
             </div>
           </section>
         )}
-
-        {/* ===== Meta grid ===== */}
-        <div
-          className="grid grid-cols-3 gap-6 mb-10 p-7 rounded-3xl"
-          style={{
-            background: 'rgba(251, 250, 246, 0.6)',
-            border: '1px solid rgba(26, 24, 20, 0.06)',
-            backdropFilter: 'blur(8px)',
-          }}
-        >
-          <div>
-            <p
-              className="text-[10px] uppercase tracking-[0.2em] mb-2"
-              style={{ color: 'var(--color-fg-muted)', fontFamily: 'var(--font-mono)' }}
-            >
-              {t('detail.metaDownloads')}
-            </p>
-            <p
-              className="text-3xl"
-              style={{
-                fontFamily: 'var(--font-display)',
-                fontWeight: 400,
-                color: 'var(--color-fg)',
-              }}
-            >
-              {resource.downloadCount}
-            </p>
-          </div>
-          <div>
-            <p
-              className="text-[10px] uppercase tracking-[0.2em] mb-2"
-              style={{ color: 'var(--color-fg-muted)', fontFamily: 'var(--font-mono)' }}
-            >
-              {t('detail.metaCategory')}
-            </p>
-            <p className="text-base" style={{ color: 'var(--color-fg)' }}>
-              {resource.category === 'UE' ? t('detail.categoryUnreal') : resource.category}
-            </p>
-          </div>
-          <div>
-            <p
-              className="text-[10px] uppercase tracking-[0.2em] mb-2"
-              style={{ color: 'var(--color-fg-muted)', fontFamily: 'var(--font-mono)' }}
-            >
-              {t('detail.metaAdded')}
-            </p>
-            <p className="text-base" style={{ color: 'var(--color-fg)' }}>
-              {formattedDate}
-            </p>
-          </div>
-        </div>
 
         {/* ===== Download CTA (bottom) — only for non-blend resources ===== */}
         {!isBlendAsset(resource.tagGroups) && resource.fileUrl && (

@@ -293,6 +293,39 @@ export const en = {
   'gsplats.resultDryRunNote':
     'Dry-run mode: sparse/0/ contains a stub. Re-run without Dry-run to populate real COLMAP output.',
   'gsplats.backToResources': 'Resources',
+
+  // ====== Taxonomy: filters & badges (Home / Detail) ======
+  'home.filterCategory': 'Software',
+  'home.filterType': 'Type',
+  'home.filterPrice': 'Price',
+  'home.filterSort': 'Sort',
+  'home.sortNew': 'Newest',
+  'home.sortDownloads': 'Most downloaded',
+  'home.filterClear': 'Clear',
+  'home.filterEmpty': 'No resources match these filters.',
+  'home.badgeFree': 'Free',
+  'home.badgePaid': 'Paid',
+
+  // ====== Taxonomy: resource types ======
+  'resourceType.plugin': 'Plugin / Script',
+  'resourceType.preset': 'Preset / Template',
+  'resourceType.material': 'Material / Texture',
+  'resourceType.model': 'Model / Asset',
+  'resourceType.project': 'Project File',
+  'resourceType.tutorial': 'Tutorial / Doc',
+  'resourceType.aiworkflow': 'AI Workflow Pack',
+  'resourceType.audio': 'Audio / Music',
+
+  // ====== Taxonomy: licenses ======
+  'license.cc0': 'CC0',
+  'license.mit': 'MIT',
+  'license.gpl': 'GPL',
+  'license.commercial': 'Commercial',
+
+  // ====== Taxonomy: languages ======
+  'language.zh': 'Chinese',
+  'language.en': 'English',
+  'language.localized': 'Localized',
 } as const;
 
 // Derive the canonical key union from the english dictionary so zh.ts

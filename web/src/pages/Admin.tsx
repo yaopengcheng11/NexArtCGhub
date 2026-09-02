@@ -47,6 +47,10 @@ export function formReducer(state: AdminResourceForm, action: FormAction): Admin
         fileUrl: action.resource.fileUrl ?? '',
         panCode: action.resource.panCode ?? '',
         renderEngine: tg?.renderEngine ?? '',
+        resType: action.resource.resType ?? '',
+        license: action.resource.license ?? '',
+        language: action.resource.language ?? '',
+        isFree: action.resource.isFree !== 0,
         tagGroups: {
           software: tg?.software ?? [],
           element: tg?.element ?? [],
@@ -73,6 +77,31 @@ function parseTagsString(s: string): string {
   try {
     const parsed = JSON.parse(s);
     return Array.isArray(parsed) ? parsed.join(', ') : s;
+  } catch {
+    return s;
+  }
+}
+
+// The server returns tagGroups as a raw JSON string from SQLite. Parse it
+// into the object the form reducer + tag UI expect (mirrors ResourceDetail).
+function parseTagGroups(tg: unknown): AdminResource['tagGroups'] {
+  if (!tg) return null;
+  if (typeof tg === 'string') {
+    try {
+      return JSON.parse(tg);
+    } catch {
+      return null;
+    }
+  }
+  return tg as AdminResource['tagGroups'];
+}
+
+// Compact date for the admin "Added" column (SQLite datetime or ISO).
+function formatDate(s: string): string {
+  try {
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return s;
+    return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
   } catch {
     return s;
   }
@@ -201,7 +230,11 @@ function ResourcesTab() {
   const fetchResources = async () => {
     setLoading(true);
     const r = await apiFetch<AdminResource[]>('/api/resources');
-    setResources(r.ok ? (Array.isArray(r.data) ? r.data : []) : []);
+    setResources(
+      r.ok && Array.isArray(r.data)
+        ? r.data.map((x) => ({ ...x, tagGroups: parseTagGroups(x.tagGroups) }))
+        : []
+    );
     setLoading(false);
   };
 
@@ -240,7 +273,11 @@ function ResourcesTab() {
       .split(',')
       .map((t) => t.trim())
       .filter(Boolean);
-    const url = editingId ? `/api/resources/${editingId}` : '/api/resources';
+    // Write routes are under /api/admin/* (requireAuth + requireAdmin) —
+    // /api/resources is GET-only. tagGroups must be a JSON string: the
+    // backend JSON.parses it when renderEngine is present and stores it
+    // as text either way (an object would bind-fail / wipe the groups).
+    const url = editingId ? `/api/admin/resources/${editingId}` : '/api/admin/resources';
     const method = editingId ? 'PUT' : 'POST';
     const r = await apiFetch(url, {
       method,
@@ -253,7 +290,11 @@ function ResourcesTab() {
         fileUrl: formData.fileUrl,
         panCode: formData.panCode,
         renderEngine: formData.renderEngine || null,
-        tagGroups: formData.tagGroups,
+        tagGroups: JSON.stringify(formData.tagGroups),
+        resType: formData.resType,
+        license: formData.license,
+        language: formData.language || null,
+        isFree: formData.isFree ? 1 : 0,
       },
     });
     if (!r.ok) {
@@ -324,6 +365,7 @@ function ResourcesTab() {
               >
                 <th className="px-6 py-4 font-medium">Title</th>
                 <th className="px-6 py-4 font-medium">Category</th>
+                <th className="px-6 py-4 font-medium">Added</th>
                 <th className="px-6 py-4 font-medium">Tags</th>
                 <th className="px-6 py-4 font-medium">Downloads</th>
                 <th className="px-6 py-4 font-medium text-right">Actions</th>
@@ -332,13 +374,13 @@ function ResourcesTab() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={5} className="px-6 py-12 text-center" style={{ color: 'var(--color-fg-muted)' }}>
+                  <td colSpan={6} className="px-6 py-12 text-center" style={{ color: 'var(--color-fg-muted)' }}>
                     Loading…
                   </td>
                 </tr>
               ) : resources.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="px-6 py-12 text-center" style={{ color: 'var(--color-fg-muted)' }}>
+                  <td colSpan={6} className="px-6 py-12 text-center" style={{ color: 'var(--color-fg-muted)' }}>
                     No resources yet.
                   </td>
                 </tr>
@@ -403,6 +445,9 @@ function ResourceRow({
       </td>
       <td className="px-6 py-4" style={{ color: 'var(--color-fg-soft)' }}>
         {resource.category}
+      </td>
+      <td className="px-6 py-4 text-[11px]" style={{ color: 'var(--color-fg-muted)', fontFamily: 'var(--font-mono)' }}>
+        {formatDate(resource.createdAt)}
       </td>
       <td
         className="px-6 py-4 text-[11px]"

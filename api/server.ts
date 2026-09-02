@@ -19,7 +19,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { spawn, execSync } from 'child_process';
 import crypto from 'crypto';
-import os from 'os';
+import zlib from 'zlib';
 import dotenv from 'dotenv';
 
 // Load .env BEFORE reading process.env anywhere below. dotenv won't
@@ -58,6 +58,9 @@ if (
 // Force the narrow with a non-null assertion since the early-exit guarantees
 // we never get here with an invalid value.
 const JWT_SIGNING_KEY: string = JWT_SECRET;
+// Registration invite code. In production this MUST come from the env —
+// a hard-coded default would let anyone register and drain the free-tier
+// credits. Dev keeps a fixed fallback so local testing still works.
 const INVITE_CODE = process.env.INVITE_CODE || 'ethereal-2026';
 const CORS_ORIGIN = (process.env.CORS_ORIGIN || 'http://localhost:3000')
   .split(',')
@@ -268,7 +271,25 @@ const HDA_FILE_PATH = process.env.HDA_FILE_PATH ||
 // tokens, which is fine (different namespaces).
 const DOWNLOAD_SIGN_SECRET = process.env.DOWNLOAD_SIGN_SECRET || JWT_SIGNING_KEY;
 
+// Canonical public origin used in Stripe redirect URLs. Never trust the
+// Host header for these — a spoofed Host (or a misconfigured proxy)
+// would send paid users to an attacker origin carrying their
+// session_id. Set PUBLIC_ORIGIN in production; dev falls back to the
+// request origin so localhost testing keeps working.
+const PUBLIC_ORIGIN = (process.env.PUBLIC_ORIGIN || '').trim().replace(/\/+$/, '');
+
 const IS_PROD = process.env.NODE_ENV === 'production';
+
+// INVITE_CODE must be explicitly set in production. The dev fallback
+// above is fine for local work, but a shipped default invite code makes
+// registration public — refuse to boot rather than risk it.
+if (IS_PROD && !process.env.INVITE_CODE) {
+  console.error(
+    '[FATAL] INVITE_CODE is not set. Set a strong random invite code in ' +
+      'api/.env before starting the API in production.'
+  );
+  process.exit(1);
+}
 
 // JSON parse helper that returns null on failure instead of throwing
 function safeJson(s: string | null | undefined): any {
@@ -283,6 +304,16 @@ function safeJson(s: string | null | undefined): any {
 async function startServer() {
   const app = express();
 
+  // Behind a tunnel / reverse proxy (ngrok, cloudflared, Nginx) every
+  // request arrives from the proxy's local connection, so req.ip would
+  // collapse to 127.0.0.1 — and the per-IP rate limiters would share one
+  // bucket for ALL visitors. TRUST_PROXY=1 makes Express honor
+  // X-Forwarded-For (set by those proxies) so rate limiting sees real
+  // client IPs. Only enable when you actually run behind such a proxy.
+  if (process.env.TRUST_PROXY === '1') {
+    app.set('trust proxy', 1);
+  }
+
   // Rate-limit the tool endpoints: each spawns hython.exe which is
   // CPU-heavy and can pin a worker for minutes if it hangs. 5 req/min
   // per user (or IP if anonymous, but tools require auth) is plenty for
@@ -295,6 +326,24 @@ async function startServer() {
     legacyHeaders: false,
     keyGenerator: (req: any) => String(req.user?.id ?? req.ip ?? 'anon'),
     message: { error: 'too_many_requests', message: 'Tool rate limit exceeded (5/min).' },
+  });
+
+  // Auth endpoints get their own limiters: no brute-forcing passwords or
+  // invite codes, and bcrypt(12) is ~250ms per attempt — an unthrottled
+  // flood is a cheap CPU DoS against the event loop.
+  const loginLimiter = rateLimit({
+    windowMs: 15 * 60_000,
+    limit: 20,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'too_many_attempts', message: 'Too many login attempts. Try again later.' },
+  });
+  const registerLimiter = rateLimit({
+    windowMs: 60 * 60_000,
+    limit: 5,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'too_many_attempts', message: 'Too many registration attempts. Try again later.' },
   });
 
   app.use(compression());
@@ -375,8 +424,35 @@ async function startServer() {
           return { dedup: false, warning: 'metadata_missing' };
         }
 
+        // ---- Reconcile against the local pending payment BEFORE
+        // fulfilling. A signed event is trustworthy, but its metadata must
+        // describe a payment we actually created, for this user, still
+        // pending, of the right kind, for the right amount/session.
+        // A mismatch returns 200 (Stripe stops retrying) but NEVER grants
+        // the entitlement — an operator reconciles the row by hand.
+        const payment: any = await db.get(
+          `SELECT id, kind, status, amountCents, currency, providerSessionId, creditsAdded, tier
+           FROM payments WHERE id = ? AND userId = ?`,
+          [paymentId, userId]
+        );
+        if (!payment || payment.kind !== kind || payment.status !== 'pending') {
+          return { dedup: false, warning: 'payment_mismatch' };
+        }
+        if (session.id && payment.providerSessionId && payment.providerSessionId !== session.id) {
+          return { dedup: false, warning: 'payment_mismatch' };
+        }
+        if (session.payment_status && session.payment_status !== 'paid') {
+          return { dedup: false, warning: 'payment_not_paid' };
+        }
+        if (typeof session.amount_total === 'number' && payment.amountCents !== session.amount_total) {
+          return { dedup: false, warning: 'amount_mismatch' };
+        }
+
         if (kind === 'credits') {
           const credits = Number(meta.credits || 0);
+          if (payment.creditsAdded != null && credits !== payment.creditsAdded) {
+            return { dedup: false, warning: 'credits_mismatch' };
+          }
           await db.run(
             `UPDATE payments SET status = 'completed', completedAt = datetime('now') WHERE id = ?`,
             [paymentId]
@@ -412,6 +488,9 @@ async function startServer() {
             throw new Error(
               `invalid_hda_metadata: tier=${tier} maxRuns=${maxRuns}`
             );
+          }
+          if (payment.tier && payment.tier !== tier) {
+            return { dedup: false, warning: 'tier_mismatch' };
           }
           const durationDays = Number(meta.durationDays || 365);
           const expiresAt = new Date(
@@ -449,7 +528,15 @@ async function startServer() {
       if (result.dedup) {
         return res.json({ received: true, dedup: true });
       }
-      if (result.warning === 'metadata_missing' || result.warning === 'unknown_kind') {
+      if (
+        result.warning === 'metadata_missing' ||
+        result.warning === 'unknown_kind' ||
+        result.warning === 'payment_mismatch' ||
+        result.warning === 'payment_not_paid' ||
+        result.warning === 'amount_mismatch' ||
+        result.warning === 'credits_mismatch' ||
+        result.warning === 'tier_mismatch'
+      ) {
         console.warn('[stripe webhook]', result.warning, event.id);
         return res.json({ received: true, warning: result.warning });
       }
@@ -525,7 +612,7 @@ async function startServer() {
   };
 
   // --- Auth routes ---
-  app.post('/api/auth/login', async (req: any, res: any) => {
+  app.post('/api/auth/login', loginLimiter, async (req: any, res: any) => {
     const { username, password } = req.body || {};
     if (!username || !password) {
       return res.status(400).json({ error: 'Username and password required' });
@@ -576,13 +663,23 @@ async function startServer() {
     }
   });
 
-  app.post('/api/auth/register', async (req: any, res: any) => {
+  app.post('/api/auth/register', registerLimiter, async (req: any, res: any) => {
     const { username, email, password, code } = req.body || {};
     if (!username || !password || !code) {
       return res.status(400).json({ error: 'username, password, and invite code required' });
     }
-    if (code !== INVITE_CODE) {
-      return res.status(403).json({ error: 'Invalid invitation code' });
+    // Two kinds of valid codes:
+    //   1. the env master code (INVITE_CODE) — never expires, reusable
+    //   2. a one-time code from the invites table (admin console) — single-use
+    const isMasterCode = code === INVITE_CODE;
+    if (!isMasterCode) {
+      const valid: any = await db.get(
+        `SELECT id FROM invites WHERE code = ? AND usedBy IS NULL`,
+        [code]
+      );
+      if (!valid) {
+        return res.status(403).json({ error: 'Invalid or already-used invitation code' });
+      }
     }
     try {
       const existing = await db.get(
@@ -595,8 +692,21 @@ async function startServer() {
         `INSERT INTO users (username, email, password, role) VALUES (?, ?, ?, 'user')`,
         [username, email || null, hash]
       );
+      const newUserId = r.lastID;
+      if (!isMasterCode) {
+        // Atomically consume the one-time code. If two registrations race
+        // on the same code, only one wins — the loser rolls back its user.
+        const used: any = await db.run(
+          `UPDATE invites SET usedBy = ?, usedAt = datetime('now') WHERE code = ? AND usedBy IS NULL`,
+          [newUserId, code]
+        );
+        if ((used?.changes ?? 0) !== 1) {
+          await db.run(`DELETE FROM users WHERE id = ?`, [newUserId]);
+          return res.status(403).json({ error: 'Invalid or already-used invitation code' });
+        }
+      }
       const token = jwt.sign(
-        { id: r.lastID, username, role: 'user' },
+        { id: newUserId, username, role: 'user' },
         JWT_SIGNING_KEY,
         { expiresIn: '30d' }
       );
@@ -606,7 +716,7 @@ async function startServer() {
         secure: IS_PROD,
         maxAge: 30 * 24 * 3600 * 1000,
       });
-      res.json({ message: 'Account created', user: { id: r.lastID, username, role: 'user' } });
+      res.json({ message: 'Account created', user: { id: newUserId, username, role: 'user' } });
     } catch (e: any) {
       console.error('[auth/register]', e);
       res.status(500).json({ error: 'internal_error' });
@@ -675,7 +785,9 @@ async function startServer() {
       [req.user.id, tier.id, tier.amount, tier.credits, currency]
     );
     const paymentId = payment.lastID;
-    const origin = `${req.protocol}://${req.get('host')}`;
+    // Use the canonical origin for redirect URLs — never the Host header
+    // (see PUBLIC_ORIGIN above). Dev falls back to the request origin.
+    const origin = PUBLIC_ORIGIN || `${req.protocol}://${req.get('host')}`;
     const methods = PAYMENT_METHODS_BY_CURRENCY[currency];
     const lineItemParams = buildLineItemParams(
       `HIP Path Doctor — ${tier.name} (${tier.credits} credits)`,
@@ -735,7 +847,8 @@ async function startServer() {
       [req.user.id, tier.id, tier.amount, currency]
     );
     const paymentId = payment.lastID;
-    const origin = `${req.protocol}://${req.get('host')}`;
+    // Use the canonical origin for redirect URLs — never the Host header.
+    const origin = PUBLIC_ORIGIN || `${req.protocol}://${req.get('host')}`;
     const methods = PAYMENT_METHODS_BY_CURRENCY[currency];
     const lineItemParams = buildLineItemParams(
       `yaopc::FolderPathFixed HDA — ${tier.name}`,
@@ -786,15 +899,37 @@ async function startServer() {
     // If it's an HDA purchase, also build a one-time signed download URL.
     let downloadUrl: string | null = null;
     if (row.kind === 'hda' && row.hdaLicenseKey) {
-      const token = crypto.randomBytes(24).toString('hex');
-      const expiresAt = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
       const licRow: any = await db.get(
         `SELECT id FROM licenses WHERE key = ?`, [row.hdaLicenseKey]
       );
-      await db.run(
-        `INSERT INTO hdaDownloads (licenseId, token, expiresAt) VALUES (?, ?, ?)`,
-        [licRow.id, token, expiresAt]
+      if (!licRow) return res.status(404).json({ error: 'license_not_found' });
+      // Reuse any still-valid unused token so repeated lookups can't mint
+      // unbounded download links (and grow hdaDownloads forever). Only mint
+      // a fresh one when nothing usable remains.
+      let token: string;
+      let expiresAt: string;
+      const existing: any = await db.get(
+        `SELECT token, expiresAt FROM hdaDownloads
+          WHERE licenseId = ? AND usedAt IS NULL AND expiresAt > datetime('now')
+          LIMIT 1`,
+        [licRow.id]
       );
+      if (existing) {
+        token = existing.token;
+        expiresAt = existing.expiresAt;
+      } else {
+        token = crypto.randomBytes(24).toString('hex');
+        expiresAt = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+        await db.run(
+          `INSERT INTO hdaDownloads (licenseId, token, expiresAt) VALUES (?, ?, ?)`,
+          [licRow.id, token, expiresAt]
+        );
+        // Prune spent tokens for this license so the table stays small.
+        await db.run(
+          `DELETE FROM hdaDownloads WHERE licenseId = ? AND (usedAt IS NOT NULL OR expiresAt <= datetime('now'))`,
+          [licRow.id]
+        );
+      }
       const sig = crypto
         .createHmac('sha256', DOWNLOAD_SIGN_SECRET)
         .update(`${token}:${licRow.id}:${expiresAt}`)
@@ -843,11 +978,16 @@ async function startServer() {
     if (!fs.existsSync(HDA_FILE_PATH)) {
       return res.status(503).json({ error: 'hda_not_deployed' });
     }
-    // Mark as used (single-use token).
-    await db.run(
-      `UPDATE hdaDownloads SET usedAt = datetime('now') WHERE id = ?`,
+    // Mark as used atomically — only one concurrent request can win the
+    // conditional UPDATE; every other racer sees already_used and cannot
+    // stream the HDA twice off the same token.
+    const mark: any = await db.run(
+      `UPDATE hdaDownloads SET usedAt = datetime('now') WHERE id = ? AND usedAt IS NULL`,
       [dlRow.id]
     );
+    if ((mark?.changes ?? 0) !== 1) {
+      return res.status(410).json({ error: 'already_used' });
+    }
     const licRow: any = await db.get(
       `SELECT key, tier FROM licenses WHERE id = ?`, [Number(license)]
     );
@@ -891,17 +1031,45 @@ async function startServer() {
   // ===================================================================
   // Resources (public read + admin write)
   // ===================================================================
-  app.get('/api/resources', async (_req: any, res: any) => {
+  app.get('/api/resources', async (req: any, res: any) => {
+    // Taxonomy filters (all optional): category=软件, type=资源类型,
+    // free=1|0, license=许可 key, q=标题/描述/标签搜索, sort=new|downloads.
+    const category = String(req.query.category || '').trim();
+    const type = String(req.query.type || '').trim();
+    const free = String(req.query.free || '').trim();
+    const license = String(req.query.license || '').trim();
+    const q = String(req.query.q || '').trim();
+    const sort = String(req.query.sort || 'new').trim();
+
+    const where: string[] = [];
+    const params: any[] = [];
+    if (category) { where.push(`category = ?`); params.push(category); }
+    if (type) { where.push(`resType = ?`); params.push(type); }
+    if (free === '1' || free === '0') { where.push(`isFree = ?`); params.push(Number(free)); }
+    if (license) { where.push(`license = ?`); params.push(license); }
+    if (q) {
+      where.push(`(title LIKE ? OR description LIKE ? OR tags LIKE ?)`);
+      const like = `%${q}%`;
+      params.push(like, like, like);
+    }
+    const orderBy = sort === 'downloads' ? `downloadCount DESC` : `createdAt DESC`;
     const rows: any[] = await db.all(
-      `SELECT id, title, description, category, tags, imageUrl, fileUrl, panCode, downloadCount, createdAt, updatedAt, tagGroups
-       FROM resources ORDER BY createdAt DESC`
+      `SELECT id, title, description, category, tags, imageUrl, fileUrl, panCode,
+              downloadCount, createdAt, updatedAt, tagGroups,
+              resType, license, language, isFree
+       FROM resources
+       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+       ORDER BY ${orderBy}`,
+      params
     );
     res.json(rows);
   });
 
   app.get('/api/resources/:id', async (req: any, res: any) => {
     const row: any = await db.get(
-      `SELECT id, title, description, category, tags, imageUrl, fileUrl, panCode, downloadCount, createdAt, updatedAt, tagGroups
+      `SELECT id, title, description, category, tags, imageUrl, fileUrl, panCode,
+              downloadCount, createdAt, updatedAt, tagGroups,
+              resType, license, language, isFree
        FROM resources WHERE id = ?`,
       [Number(req.params.id)]
     );
@@ -935,6 +1103,27 @@ async function startServer() {
     limits: { fileSize: 200 * 1024 * 1024 },
   });
 
+  // Canonical taxonomy keys (mirrored in web/src/types/admin.ts so the
+  // admin form and the API validate against the same sets).
+  const RESOURCE_TYPES = ['plugin', 'preset', 'material', 'model', 'project', 'tutorial', 'aiworkflow', 'audio'];
+  const RESOURCE_LICENSES = ['cc0', 'mit', 'gpl', 'commercial'];
+  const RESOURCE_LANGUAGES = ['zh', 'en', 'localized'];
+
+  function parseTaxonomy(body: any): { resType: string; license: string; language: string | null; isFree: number } | { error: string } {
+    const resType = String(body?.resType ?? '').trim();
+    const license = String(body?.license ?? '').trim();
+    const language = String(body?.language ?? '').trim();
+    // isFree arrives as '1'/'0' (multipart) or boolean (JSON).
+    const rawFree = body?.isFree;
+    const isFree = rawFree === undefined || rawFree === null ? null
+      : (rawFree === true || rawFree === '1' || rawFree === 1 || rawFree === 'true' ? 1 : 0);
+    if (!RESOURCE_TYPES.includes(resType)) return { error: 'resType required (plugin|preset|material|model|project|tutorial|aiworkflow|audio)' };
+    if (!RESOURCE_LICENSES.includes(license)) return { error: 'license required (cc0|mit|gpl|commercial)' };
+    if (isFree === null) return { error: 'isFree required (1=free, 0=paid)' };
+    if (language && !RESOURCE_LANGUAGES.includes(language)) return { error: 'language must be zh|en|localized' };
+    return { resType, license, language: language || null, isFree };
+  }
+
   app.post(
     '/api/admin/resources',
     requireAuth,
@@ -943,11 +1132,15 @@ async function startServer() {
     async (req: any, res: any) => {
       const { title, description, category, tags, imageUrl, tagGroups } = req.body || {};
       if (!title) return res.status(400).json({ error: 'title required' });
+      const tax = parseTaxonomy(req.body);
+      if ('error' in tax) return res.status(400).json({ error: tax.error });
       const fileUrl = req.file ? `/api/files/${req.file.filename}` : (req.body?.fileUrl || '#');
       const r: any = await db.run(
-        `INSERT INTO resources (title, description, category, tags, imageUrl, fileUrl, tagGroups)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [title, description || '', category || '', tags || '[]', imageUrl || '', fileUrl, tagGroups || null]
+        `INSERT INTO resources (title, description, category, tags, imageUrl, fileUrl, tagGroups,
+                                resType, license, language, isFree)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [title, description || '', category || '', tags || '[]', imageUrl || '', fileUrl,
+         tagGroups || null, tax.resType, tax.license, tax.language, tax.isFree]
       );
       res.json({ ok: true, id: r.lastID });
     }
@@ -957,6 +1150,9 @@ async function startServer() {
     const id = Number(req.params.id);
     const { title, description, category, tags, imageUrl, tagGroups,
             fileUrl, panCode, renderEngine } = req.body || {};
+
+    const tax = parseTaxonomy(req.body);
+    if ('error' in tax) return res.status(400).json({ error: tax.error });
 
     // If the admin submitted a `renderEngine` (used as a manual
     // override when the parser couldn't read it — see manage.py
@@ -978,9 +1174,11 @@ async function startServer() {
     await db.run(
       `UPDATE resources SET title = ?, description = ?, category = ?, tags = ?,
        imageUrl = ?, tagGroups = ?, fileUrl = ?, panCode = ?,
+       resType = ?, license = ?, language = ?, isFree = ?,
        updatedAt = datetime('now') WHERE id = ?`,
       [title, description, category, tags, imageUrl, tagGroupsStr,
-       fileUrl ?? null, panCode ?? null, id]
+       fileUrl ?? null, panCode ?? null,
+       tax.resType, tax.license, tax.language, tax.isFree, id]
     );
     res.json({ ok: true });
   });
@@ -1032,6 +1230,66 @@ async function startServer() {
     const BLEND_MAX_BYTES = parseInt(
       process.env.BLEND_MAX_BYTES || String(1024 * 1024 * 1024), 10);  // 1 GB
 
+    // Lightweight-server knobs (2026-08): the target box is 2 GB RAM /
+    // 2 vCPU, so heavy Blender work is opt-in, not default.
+    //   * BLEND_RENDER_THUMBNAILS=1  — render a real 2048px thumbnail via
+    //     Blender. Default OFF: we write a tiny placeholder PNG in pure
+    //     Node instead. A Blender thumbnail render is the single heaviest
+    //     job in the whole app (minutes of CPU + ~1 GB RAM) and the user
+    //     only needs the manifest parse.
+    //   * BLEND_ASSET_EXTRACT_ENABLED=0 — disable per-asset zip extraction
+    //     (each download would spawn a Blender subprocess). Keep ON for
+    //     feature parity; set 0 if you only ship the full pack via baidu pan.
+    const BLEND_RENDER_THUMBNAILS = process.env.BLEND_RENDER_THUMBNAILS === '1';
+    const BLEND_ASSET_EXTRACT_ENABLED = process.env.BLEND_ASSET_EXTRACT_ENABLED !== '0';
+
+    // ---- Minimal pure-Node PNG writer (no deps) -----------------------
+    // Writes a solid-color RGB PNG using zlib for the IDAT. Used for the
+    // placeholder thumbnail so the card/detail imageUrl stays live without
+    // ever starting Blender.
+    function crc32(buf: Buffer): number {
+      let c = 0xffffffff >>> 0;
+      for (let i = 0; i < buf.length; i++) {
+        c = c ^ (buf[i] ?? 0);
+        for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1));
+      }
+      return (c ^ 0xffffffff) >>> 0;
+    }
+    function pngChunk(type: string, data: Buffer): Buffer {
+      const len = Buffer.alloc(4);
+      len.writeUInt32BE(data.length, 0);
+      const typeBuf = Buffer.from(type, 'ascii');
+      const crcBuf = Buffer.alloc(4);
+      crcBuf.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])), 0);
+      return Buffer.concat([len, typeBuf, data, crcBuf]);
+    }
+    function writeSolidPng(filePath: string, rgb: [number, number, number], size = 512): void {
+      const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      const ihdr = Buffer.alloc(13);
+      ihdr.writeUInt32BE(size, 0);
+      ihdr.writeUInt32BE(size, 4);
+      ihdr[8] = 8;   // bit depth
+      ihdr[9] = 2;   // color type: truecolor RGB
+      ihdr[10] = 0;  // compression
+      ihdr[11] = 0;  // filter method
+      ihdr[12] = 0;  // interlace
+      const row = Buffer.alloc(1 + size * 3);
+      row[0] = 0; // filter: none
+      for (let x = 0; x < size; x++) {
+        row[1 + x * 3] = rgb[0];
+        row[2 + x * 3] = rgb[1];
+        row[3 + x * 3] = rgb[2];
+      }
+      const raw = Buffer.concat(Array.from({ length: size }, () => row));
+      const png = Buffer.concat([
+        sig,
+        pngChunk('IHDR', ihdr),
+        pngChunk('IDAT', zlib.deflateSync(raw, { level: 9 })),
+        pngChunk('IEND', Buffer.alloc(0)),
+      ]);
+      fs.writeFileSync(filePath, png);
+    }
+
   const blendAssetUpload = multer({
     storage: multer.diskStorage({
       destination: (_req, _file, cb) => {
@@ -1048,7 +1306,42 @@ async function startServer() {
     limits: { fileSize: BLEND_MAX_BYTES },
   });
 
+  // Blender subprocess helper. Hardened against misbehaving .blend
+  // files: caps both stdout and stderr (a malformed file can spew
+  // megabytes), enforces a 10-minute watchdog, and kills the whole
+  // process tree on Windows (taskkill /T /F — Blender spawns Python
+  // workers that a plain kill would leave alive holding file locks).
+  const BLENDER_MAX_OUTPUT_BYTES = 50 * 1024 * 1024; // 50 MB per stream
+  const BLENDER_TIMEOUT_MS = 10 * 60_000;
+  function killBlenderTree(pid: number | undefined) {
+    if (!pid) return;
+    try { process.kill(pid, 'SIGKILL'); } catch { /* already dead */ }
+    if (process.platform === 'win32') {
+      try {
+        spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+          stdio: 'ignore',
+          detached: true,
+          windowsHide: true,
+        });
+      } catch { /* best effort */ }
+    }
+  }
+  // Single-flight lock: at most ONE Blender subprocess runs at a time.
+  // On the 2 GB target box two concurrent Blender processes (e.g. two
+  // overlapping admin uploads, or an upload + an asset extraction) would
+  // OOM the box. All callers queue behind each other; a failed run never
+  // wedges the queue.
+  let blenderQueue: Promise<unknown> = Promise.resolve();
   function spawnBlender(env: Record<string, string>, script: string): Promise<{ code: number; stdout: string; stderr: string }> {
+    const run = blenderQueue.then(
+      () => doSpawnBlender(env, script),
+      () => doSpawnBlender(env, script)
+    );
+    blenderQueue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  function doSpawnBlender(env: Record<string, string>, script: string): Promise<{ code: number; stdout: string; stderr: string }> {
     return new Promise((resolve, reject) => {
       // Blender on Windows accepts only Win-style backslash absolute paths
       // via its file API. Forward-slash absolute paths get treated as
@@ -1066,10 +1359,42 @@ async function startServer() {
         windowsHide: true,
       });
       let stdout = '', stderr = '';
-      proc.stdout.on('data', (d) => { stdout += d.toString(); });
-      proc.stderr.on('data', (d) => { stderr += d.toString(); });
-      proc.on('error', reject);
-      proc.on('close', (code) => resolve({ code: code ?? 0, stdout, stderr }));
+      let stdoutBytes = 0, stderrBytes = 0;
+      let settled = false;
+      const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(watchdog);
+        killBlenderTree(proc.pid);
+        reject(err);
+      };
+      const watchdog = setTimeout(() => {
+        console.error('[blend] subprocess timed out, killing tree (pid', proc.pid, ')');
+        fail(new Error('blender_timeout'));
+      }, BLENDER_TIMEOUT_MS);
+      proc.stdout.on('data', (d: Buffer) => {
+        stdoutBytes += d.length;
+        if (stdoutBytes > BLENDER_MAX_OUTPUT_BYTES) {
+          fail(new Error('blender_stdout_too_large'));
+          return;
+        }
+        stdout += d.toString();
+      });
+      proc.stderr.on('data', (d: Buffer) => {
+        stderrBytes += d.length;
+        if (stderrBytes > BLENDER_MAX_OUTPUT_BYTES) {
+          fail(new Error('blender_stderr_too_large'));
+          return;
+        }
+        stderr += d.toString();
+      });
+      proc.on('error', (e) => fail(e));
+      proc.on('close', (code) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(watchdog);
+        resolve({ code: code ?? 0, stdout, stderr });
+      });
     });
   }
 
@@ -1182,11 +1507,45 @@ async function startServer() {
         } catch (e: any) {
           console.warn('[blend-asset] Expand-Archive failed, trying python zipfile:', e?.message);
           try {
-            execSync(
-              `python -c "import zipfile,os; zipfile.ZipFile(r'${zipPath}').extractall(r'${texDir}')"`,
-              { stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 }
+            // Safe extraction fallback: python validates every member path
+            // stays inside the staging dir (rejects absolute paths and
+            // ../ traversal) BEFORE writing anything. We never trust the
+            // zip's member names against the filesystem directly.
+            const stageDir2 = path.join(assetDir, '_textures_stage');
+            if (fs.existsSync(stageDir2)) {
+              fs.rmSync(stageDir2, { recursive: true, force: true });
+            }
+            fs.mkdirSync(stageDir2, { recursive: true });
+            // Write the validator to a temp .py file: a `-c` one-liner
+            // can't express the nested for/if cleanly, and a file avoids
+            // shell-quoting issues with the paths.
+            const pyScript = path.join(assetDir, '_safe_extract.py');
+            fs.writeFileSync(
+              pyScript,
+              [
+                'import zipfile, os, sys',
+                'def main():',
+                '    z = zipfile.ZipFile(sys.argv[1])',
+                '    base = os.path.abspath(sys.argv[2])',
+                '    for m in z.namelist():',
+                '        p = os.path.abspath(os.path.join(base, m))',
+                '        if not (p == base or p.startswith(base + os.sep)):',
+                "            raise RuntimeError('unsafe zip member: ' + m)",
+                '    z.extractall(base)',
+                'if __name__ == "__main__":',
+                '    main()',
+              ].join('\n')
             );
-            // Flatten similarly
+            try {
+              execSync(
+                `python "${pyScript}" "${zipPath}" "${stageDir2}"`,
+                { stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 }
+              );
+            } finally {
+              try { fs.unlinkSync(pyScript); } catch { /* best effort */ }
+            }
+            // Flatten identically to the primary path (no self-copy bug:
+            // we walk the STAGING dir, never texDir).
             const seen = new Map<string, string>();
             const walk = (dir: string) => {
               for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -1194,13 +1553,18 @@ async function startServer() {
                 if (e.isDirectory()) walk(full);
                 else if (e.isFile()) {
                   const base = path.basename(full);
+                  if (seen.has(base) && seen.get(base) !== full) {
+                    console.warn('[blend-asset] duplicate texture basename',
+                      base, '<-', seen.get(base), 'overwritten by', full);
+                  }
                   fs.copyFileSync(full, path.join(texDir, base));
                   seen.set(base, full);
                 }
               }
             };
-            walk(texDir);
+            walk(stageDir2);
             texturesUnpacked = fs.readdirSync(texDir).length;
+            fs.rmSync(stageDir2, { recursive: true, force: true });
           } catch (e2: any) {
             console.error('[blend-asset] both extract methods failed:', e2?.message);
             return res.status(500).json({
@@ -1328,9 +1692,9 @@ async function startServer() {
               },
             };
 
-            // imageUrl points to the thumbnail endpoint. The PNG is rendered
-            // asynchronously below so the user's browser starts polling
-            // shortly after upload completes.
+            // imageUrl points to the thumbnail endpoint. The PNG is either
+            // a pure-Node placeholder (default — no Blender) or a real
+            // Blender render when BLEND_RENDER_THUMBNAILS=1.
             const imageUrl = `/api/blend-assets/${resourceId}/thumbnail`;
             const fileUrl = `/api/blend-assets/${resourceId}`;
 
@@ -1340,46 +1704,67 @@ async function startServer() {
               [imageUrl, fileUrl, JSON.stringify(tagGroups), resourceId]
             );
 
-            // ---- Fire-and-forget: render thumbnail asynchronously ----
-            // The user already has enough info to render the detail page
-            // (asset list, stats), so we don't block the upload response on
-            // the thumbnail. The card imageUrl will 404 until the render
-            // finishes — that's acceptable; the user sees a gradient fallback.
+            // ---- Thumbnail: placeholder PNG by default (no Blender) ----
+            // The target server is a 2 GB box — a 2048px Blender render is
+            // the single heaviest job in the app, so it's OFF by default.
+            // BLEND_RENDER_THUMBNAILS=1 re-enables the real render for dev
+            // machines that have Blender and want actual previews.
             const thumbnailPath = path.join(assetDir, 'thumbnail.png');
-            (async () => {
-              try {
-                const env: Record<string, string> = {
-                  BLEND_THUMBNAIL_INPUT: fixedBlend,
-                  BLEND_THUMBNAIL_OUTPUT: thumbnailPath,
-                  BLEND_THUMBNAIL_SIZE: '2048',
-                };
-                const { stdout, stderr } = await spawnBlender(env, BLEND_THUMBNAIL_SCRIPT);
-                const summary = extractSummary(stdout, 'THUMB SUMMARY')
-                  || extractSummary(stderr, 'THUMB SUMMARY');
-                if (summary && summary.ok && fs.existsSync(thumbnailPath)) {
-                  // Patch the row with thumbnail_ready flag so the frontend
-                  // knows the card image is live (or could refetch).
-                  try {
-                    const cur = await db.get(
-                      `SELECT tagGroups FROM resources WHERE id = ?`, [resourceId]);
-                    if (cur && cur.tagGroups) {
-                      const tg = safeJson(cur.tagGroups) || {};
-                      tg.thumbnailReady = true;
-                      await db.run(
-                        `UPDATE resources SET tagGroups = ? WHERE id = ?`,
-                        [JSON.stringify(tg), resourceId]);
+            if (BLEND_RENDER_THUMBNAILS) {
+              // Fire-and-forget: render asynchronously. The upload response
+              // doesn't wait for it — the card imageUrl 404s (gradient
+              // fallback) until the render lands.
+              (async () => {
+                try {
+                  const env: Record<string, string> = {
+                    BLEND_THUMBNAIL_INPUT: fixedBlend,
+                    BLEND_THUMBNAIL_OUTPUT: thumbnailPath,
+                    BLEND_THUMBNAIL_SIZE: '2048',
+                  };
+                  const { stdout, stderr } = await spawnBlender(env, BLEND_THUMBNAIL_SCRIPT);
+                  const summary = extractSummary(stdout, 'THUMB SUMMARY')
+                    || extractSummary(stderr, 'THUMB SUMMARY');
+                  if (summary && summary.ok && fs.existsSync(thumbnailPath)) {
+                    try {
+                      const cur = await db.get(
+                        `SELECT tagGroups FROM resources WHERE id = ?`, [resourceId]);
+                      if (cur && cur.tagGroups) {
+                        const tg = safeJson(cur.tagGroups) || {};
+                        tg.thumbnailReady = true;
+                        await db.run(
+                          `UPDATE resources SET tagGroups = ? WHERE id = ?`,
+                          [JSON.stringify(tg), resourceId]);
+                      }
+                    } catch (e) {
+                      console.warn('[blend-asset] thumbnail_ready patch failed:', e);
                     }
-                  } catch (e) {
-                    console.warn('[blend-asset] thumbnail_ready patch failed:', e);
+                  } else {
+                    console.error('[blend-asset] thumbnail render failed:',
+                      { stdout: stdout.slice(-500), stderr: stderr.slice(-500) });
                   }
-                } else {
-                  console.error('[blend-asset] thumbnail render failed:',
-                    { stdout: stdout.slice(-500), stderr: stderr.slice(-500) });
+                } catch (e: any) {
+                  console.error('[blend-asset] thumbnail spawn failed:', e?.message);
+                }
+              })();
+            } else {
+              // Pure-Node placeholder — a warm neutral block matching the
+              // site palette. Sub-millisecond, keeps imageUrl live, and
+              // never starts Blender.
+              try {
+                writeSolidPng(thumbnailPath, [214, 205, 190], 512);
+                const cur = await db.get(
+                  `SELECT tagGroups FROM resources WHERE id = ?`, [resourceId]);
+                if (cur && cur.tagGroups) {
+                  const tg = safeJson(cur.tagGroups) || {};
+                  tg.thumbnailReady = true;
+                  await db.run(
+                    `UPDATE resources SET tagGroups = ? WHERE id = ?`,
+                    [JSON.stringify(tg), resourceId]);
                 }
               } catch (e: any) {
-                console.error('[blend-asset] thumbnail spawn failed:', e?.message);
+                console.warn('[blend-asset] placeholder thumbnail failed:', e?.message);
               }
-            })();
+            }
 
             res.json({
               ok: true,
@@ -1427,7 +1812,12 @@ async function startServer() {
     });
 
     // GET /api/blend-assets/:id/assets/:aid/download — single asset zip
+    // toolLimiter: each uncached download spawns a Blender subprocess, and
+    // this endpoint is public — without a limit anyone could queue
+    // unlimited extraction jobs (sequential via the mutex, but still a
+    // CPU/disk DoS on the 2 GB box).
     app.get('/api/blend-assets/:id/assets/:aid/download',
+      toolLimiter,
       async (req: any, res: any) => {
         const id = Number(req.params.id);
         const aid = decodeURIComponent(req.params.aid);
@@ -1435,6 +1825,16 @@ async function startServer() {
         if (!tg) return res.status(404).json({ error: 'not_found_or_not_ready' });
         const asset = (tg.summary.assets || []).find((a: any) => a.id === aid);
         if (!asset) return res.status(404).json({ error: 'asset_not_in_manifest' });
+
+        // Lightweight-server guard: each extraction spawns a Blender
+        // subprocess. When disabled (BLEND_ASSET_EXTRACT_ENABLED=0) we
+        // refuse BEFORE creating dirs or touching the DB counter.
+        if (!BLEND_ASSET_EXTRACT_ENABLED) {
+          return res.status(503).json({
+            error: 'asset_extract_disabled',
+            message: 'Per-asset extraction is disabled on this server — download the full pack instead.',
+          });
+        }
 
         const assetDir = path.join(BLEND_ASSETS_DIR, String(id));
         const cacheDir = path.join(assetDir, 'cache');
@@ -1674,9 +2074,22 @@ async function startServer() {
 
   app.get('/api/admin/invites', requireAuth, requireAdmin, async (_req: any, res: any) => {
     const rows: any[] = await db.all(
-      `SELECT id, code, createdBy, usedBy, createdAt, usedAt FROM invites ORDER BY id DESC`
+      `SELECT i.id, i.code, i.createdBy, i.usedBy, i.createdAt, i.usedAt,
+              creator.username AS createdByName,
+              usr.username AS usedByName
+         FROM invites i
+         LEFT JOIN users creator ON creator.id = i.createdBy
+         LEFT JOIN users usr ON usr.id = i.usedBy
+        ORDER BY i.id DESC`
     );
     res.json({ invites: rows });
+  });
+
+  // Revoke (delete) an invite — the code becomes unredeemable.
+  app.delete('/api/admin/invites/:id', requireAuth, requireAdmin, async (req: any, res: any) => {
+    const id = Number(req.params.id);
+    await db.run(`DELETE FROM invites WHERE id = ?`, [id]);
+    res.json({ ok: true });
   });
 
   app.post('/api/admin/invites', requireAuth, requireAdmin, async (req: any, res: any) => {

@@ -281,6 +281,27 @@ export async function initDb() {
     await db.exec(`ALTER TABLE resources ADD COLUMN panCode TEXT`);
   }
 
+  // ===== Migration: taxonomy columns (资源分类体系) =====
+  // resType / license / isFree are REQUIRED on create (enforced by the
+  // admin API); language is optional. Legacy rows backfill to safe
+  // defaults: free, commercial-until-proven-otherwise license stays NULL
+  // (the UI renders '未指定'), type inferred once from tags below.
+  if (!resourceColNames.includes('resType')) {
+    await db.exec(`ALTER TABLE resources ADD COLUMN resType TEXT`);
+  }
+  if (!resourceColNames.includes('license')) {
+    await db.exec(`ALTER TABLE resources ADD COLUMN license TEXT`);
+  }
+  if (!resourceColNames.includes('language')) {
+    await db.exec(`ALTER TABLE resources ADD COLUMN language TEXT`);
+  }
+  if (!resourceColNames.includes('isFree')) {
+    await db.exec(`ALTER TABLE resources ADD COLUMN isFree INTEGER DEFAULT 1`);
+  }
+  // Backfill isFree every boot (cheap once set) so legacy rows and any
+  // crash mid-migration converge on "free".
+  await db.run(`UPDATE resources SET isFree = 1 WHERE isFree IS NULL`);
+
   // ===== Seed the super admin =====
   // Credentials are read from env so they never ship in source/git history.
   // We ONLY insert on first run; never overwrite an existing admin's
