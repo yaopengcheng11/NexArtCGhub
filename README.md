@@ -43,6 +43,16 @@
 - **Invites** 标签页：生成 / 复制链接 / 撤销邀请码
 - Stripe checkout（配置 key 后启用）：credits 购买 + HDA license 一次性签名下载
 
+### 支付（`/pricing`）
+
+- **支付宝 电脑网站支付 + 微信支付 Native 扫码**：人民币直连渠道（个体户/企业资质），零 SDK 依赖、
+  自实现 RSA2 / APIv3 签名验签；CN 用户点购买 → 选支付方式 → 支付宝跳转收银台 / 微信扫码二维码，
+  前端轮询订单状态自动跳转
+- **Stripe Checkout**：国际卡支付（USD 区），配置 key 后启用
+- 三渠道共用同一张 `payments` 表与发放逻辑（加积分 / 发 HDA license），回调均验签 + 金额比对 + 事务幂等
+- `PAYMENT_MOCK=1`（仅 dev）本地假收银台，无商户号也能端到端联调
+- 资质与密钥申请路线图见 [docs/payment-roadmap.html](./docs/payment-roadmap.html)
+
 ---
 
 ## 技术栈
@@ -63,6 +73,7 @@
 - SQLite（`sqlite3` 驱动，`sqlite` 包装，WAL 模式，busy_timeout=5000，foreign_keys=ON）
 - Python 子进程：`spawn` hython.exe / blender.exe（10 min watchdog）
 - 自带 Stripe REST helper（无 npm SDK 依赖）+ HMAC webhook 签名校验 + 幂等表
+- 支付宝（RSA2 签名验签 + 电脑网站支付）与微信支付 APIv3（请求签名 / Native 下单 / 回调验签 + AES-GCM 解密）helper，同样零依赖（`server/payment/`）
 - TypeScript `strict: true` + `noUncheckedIndexedAccess: true`
 
 **设计**
@@ -124,6 +135,10 @@ cg-resource-hub/
 |   |-- server/
 |   |   |-- db.ts                  # Schema + 迁移 + admin seed
 |   |   |-- stripe.ts              # Stripe REST + webhook sig verify
+|   |   |-- payment/               # CN 直连支付渠道（零 SDK 依赖）
+|   |   |   |-- alipay.ts          # RSA2 签名/验签 + 电脑网站支付 + notify 校验
+|   |   |   |-- wechat.ts          # APIv3 签名 + Native 下单 + 回调验签/解密
+|   |   |   `-- fulfil.ts          # 三渠道共享发货逻辑（积分 / license）
 |   |   `-- lib/
 |   |       `-- toolEndpoint.ts    # createToolEndpoint(spec) — 三个工具路由共享
 |   |-- tools/                     # Python 脚本（被 hython / blender 子进程调用）
@@ -177,7 +192,8 @@ cg-resource-hub/
 |-- scripts/baidu_pan/             # Baidu 网盘资源上传工具（独立 CLI）
 |-- docs/
 |   |-- cover.jpg                  # README 顶部封面图
-|   `-- BAIDU_PAN.md               # 网盘工具使用文档
+|   |-- BAIDU_PAN.md               # 网盘工具使用文档
+|   `-- payment-roadmap.html       # 收款上线路线图（个体户/备案/支付宝微信/补贴）
 |-- DESIGN.md                      # 视觉风格指南
 |-- .gitignore
 `-- README.md                      # ← you are here
@@ -225,6 +241,11 @@ NODE_ENV=production npm start
 | `STRIPE_SECRET_KEY` | *(空 → /checkout 503)* | Stripe live secret |
 | `STRIPE_WEBHOOK_SECRET` | *(用了 Stripe 必填)* | webhook 签名密钥 |
 | `STRIPE_PUBLISHABLE_KEY` | *(可选)* | 暴露给 `/api/pricing` 给前端 |
+| `PUBLIC_ORIGIN` | *(生产必填)* | 对外域名（支付回调 / 成功页跳转根） |
+| `FRONTEND_ORIGIN` | *(dev 前后端分离时)* | 浏览器落地 origin（支付宝 return_url / mock 跳转用） |
+| `ALIPAY_APP_ID` / `ALIPAY_PRIVATE_KEY` / `ALIPAY_PUBLIC_KEY` | *(空 → 不启用)* | 支付宝电脑网站支付三件套；配好后 CNY 区自动切直连 |
+| `WXPAY_MCHID` / `WXPAY_APPID` / `WXPAY_SERIAL_NO` / `WXPAY_PRIVATE_KEY` / `WXPAY_APIV3_KEY` | *(空 → 不启用)* | 微信支付 APIv3 Native；平台证书自动拉取缓存 |
+| `PAYMENT_MOCK` | `0` | `1` 时用本地假收银台替换 CN 网关（仅 dev，生产拒绝启用） |
 | `DB_PATH` | `./data/database.sqlite` | 相对 `api/` cwd |
 
 **前端无运行时环境变量**（刻意为之 —— API 是唯一可信源）。
@@ -247,9 +268,10 @@ NODE_ENV=production npm start
 | `GET` | `/api/resources/:id` | 资源详情（解析 `tagGroups`） |
 | `POST` | `/api/resources/:id/download` | 计数 +1 |
 | `GET` | `/api/credits/balance` | `{ credits, isSubscribed, resetAt }`（需登录） |
-| `POST` | `/api/checkout/credits` | Stripe credits 结账（需登录） |
-| `POST` | `/api/checkout/hda` | Stripe HDA license（需登录） |
-| `GET` | `/api/payments/lookup?session_id=` | Stripe success 页元数据（需登录） |
+| `POST` | `/api/checkout/credits` | credits 结账（需登录；CNY 按 `method` 走支付宝/微信，USD 走 Stripe） |
+| `POST` | `/api/checkout/hda` | HDA license 结账（同上） |
+| `GET` | `/api/payments/lookup?session_id=\|payment_id=` | success 页元数据（Stripe / CN 直通）（需登录） |
+| `GET` | `/api/payments/:id/status` | 订单状态轮询（微信扫码用，需登录本人订单） |
 | `GET` | `/api/hda/download?token=…` | HDA 一次性签名下载 |
 | `GET` | `/api/pricing` | 价格表 + 区域 |
 | `GET` | `/api/blend-assets/:id/{assets,thumbnail,renders,manifest}` | blend 资产公开读 |
@@ -280,11 +302,13 @@ NODE_ENV=production npm start
 | `POST` | `/api/admin/credits/grant` | 手动积分 |
 | `GET` | `/api/admin/credits/users` | 积分余额 |
 
-### Stripe（仅配置 key 时启用）
+### 支付回调（按配置启用）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `POST` | `/api/webhooks/stripe` | 原始 body + HMAC 校验 + **幂等**（webhook_events 表） |
+| `POST` | `/api/webhooks/alipay` | RSA2 验签 + app_id/金额比对 + 事务幂等；应答 `success`/`fail` 文本 |
+| `POST` | `/api/webhooks/wechat` | APIv3 平台证书验签 + AES-256-GCM 解密 + 金额比对；应答 `{"code":"SUCCESS"}` |
 
 ---
 
@@ -294,7 +318,7 @@ NODE_ENV=production npm start
 
 - **鉴权**：bcrypt 哈希（cost 12），JWT 写入 HttpOnly cookie，30 天有效期；JWT_SECRET 启动时强制要求 ≥32 字符且非占位符
 - **授权**：三层中间件 `requireAuth`（验 JWT + 每月积分重置）→ `requireAdmin`（角色检查）→ 路由内业务逻辑；`toggle-admin` 与 `DELETE /api/admin/users/:id` 都拒绝把最后一个 admin 降级/删除，控制台永不自我锁定
-- **Stripe webhook**：HMAC-SHA256 签名 + 时间戳 + 5 min 重放窗口；`webhook_events` 表用 `INSERT OR IGNORE` 存 event id，重复投递不会重复发积分或重复发 license
+- **支付回调（三家渠道）**：Stripe HMAC-SHA256 + 5 min 重放窗口；支付宝 RSA2 验签 + app_id/金额比对；微信 APIv3 平台证书验签 + AES-256-GCM 解密。三渠道共享 `fulfilPayment`：`BEGIN IMMEDIATE` 事务 + `payments.status='pending'` 守卫 + 金额比对，重复投递不会重复发积分或 license
 - **子进程安全**：所有 spawn 用 `argv` 列表（不经过 shell）；启动前校验扩展名 + 大小；10 分钟 watchdog 强杀子进程；50 MB stdout 上限；任何退出路径都清理 tmp 目录
 - **并发写安全**：SQLite WAL 模式 + `busy_timeout=5000` + 外键强制；积分扣减是单条原子 `UPDATE … WHERE creditsRemaining > 0`，并发请求不可能双花
 - **限流**：工具端点 5 req/min/user（`express-rate-limit`）

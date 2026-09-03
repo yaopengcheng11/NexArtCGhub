@@ -10,6 +10,7 @@ import ToolHipPathDoctor from './pages/ToolHipPathDoctor';
 import ToolHipFormatBridge from './pages/ToolHipFormatBridge';
 import ToolGsplatsTrainer from './pages/ToolGsplatsTrainer';
 import Pricing from './pages/Pricing';
+import PricingSuccess from './pages/PricingSuccess';
 import { AuthProvider } from './context/AuthContext';
 import { I18nProvider } from './i18n/I18nContext';
 import { ProtectedRoute } from './components/ProtectedRoute';
@@ -58,6 +59,7 @@ export default function App() {
                         <Route path="/tools/hip-format-bridge" element={<ToolHipFormatBridge />} />
                         <Route path="/tools/gsplats-trainer" element={<ToolGsplatsTrainer />} />
                         <Route path="/pricing" element={<Pricing />} />
+                        <Route path="/pricing/success" element={<PricingSuccess />} />
                         <Route path="/login" element={<Login />} />
                         <Route path="/register" element={<Register />} />
                         <Route

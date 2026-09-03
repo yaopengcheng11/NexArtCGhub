@@ -8,6 +8,20 @@ import multer from 'multer';
 import rateLimit from 'express-rate-limit';
 import { initDb } from './server/db.js';
 import { stripeCreate, verifyStripeSignature } from './server/stripe.js';
+import { fulfilPayment } from './server/payment/fulfil.js';
+import {
+  alipayConfigured,
+  alipayConfigFromEnv,
+  buildAlipayPagePayUrl,
+  verifyAlipayNotify,
+} from './server/payment/alipay.js';
+import {
+  wechatConfigured,
+  wechatConfigFromEnv,
+  createWechatNativeOrder,
+  verifyWechatCallback,
+  decryptWechatResource,
+} from './server/payment/wechat.js';
 import {
   createToolEndpoint,
   makeToolUpload,
@@ -211,6 +225,139 @@ const PAYMENT_METHODS_BY_CURRENCY: Record<Currency, PaymentMethod[]> = {
   cny: ['wechat_pay', 'alipay'],
 };
 const DEFAULT_CURRENCY: Currency = 'usd';
+
+// Browser-facing origin (the SPA). PUBLIC_ORIGIN wins when set (single-
+// origin production); FRONTEND_ORIGIN covers dev setups where the web app
+// runs on a different port than the API (vite :5173 vs API :8789) — the
+// Alipay return_url, Stripe success_url and mock redirects must land the
+// user's BROWSER on the SPA, while notify/webhook URLs stay on the API.
+const WEB_ORIGIN = process.env.FRONTEND_ORIGIN || process.env.PUBLIC_ORIGIN || '';
+const webOriginOf = (req: any): string =>
+  WEB_ORIGIN || `${req.protocol}://${req.get('host')}`;
+
+// =====================================================================
+// Alipay + WeChat Pay (mainland-China direct gateways) + mock switch
+// =====================================================================
+// CN users pay through 支付宝电脑网站支付 / 微信支付 Native(扫码) when the
+// merchant credentials are configured; USD keeps going through Stripe.
+// PAYMENT_MOCK=1 (dev only) short-circuits both CN gateways to a local
+// fake cashier so the whole pending → callback → fulfil → success flow
+// can be exercised without merchant accounts.
+const PAYMENT_MOCK =
+  process.env.PAYMENT_MOCK === '1' && process.env.NODE_ENV !== 'production';
+
+type CnMethod = 'alipay' | 'wechat';
+
+/**
+ * out_trade_no must be unique, 6-64 alnum chars, and traceable to the
+ * payments row for reconciliation. The row is inserted first (pending),
+ * so its AUTOINCREMENT id is available when we mint the trade no.
+ */
+function generateOutTradeNo(paymentId: number): string {
+  return `CG${paymentId}T${Date.now().toString(36).toUpperCase()}R${crypto
+    .randomBytes(3)
+    .toString('hex')
+    .toUpperCase()}`;
+}
+
+function resolveCnMethod(input: any): CnMethod | null {
+  const m = String(input || '').toLowerCase();
+  if (m === 'alipay' || m === 'wechat') return m;
+  return null;
+}
+
+// CN gateways don't carry our metadata (Alipay notify has no passback in
+// the page-pay flow), so the webhook re-derives the run cap from PRICING.
+// Tier ids are shared across currencies; caps are identical.
+function maxRunsForTier(_db: any, kind: 'credits' | 'hda', tier: string | null): number {
+  if (kind !== 'hda' || !tier) return 0;
+  const t =
+    PRICING.cny.hda.find((x) => x.id === tier) || PRICING.usd.hda.find((x) => x.id === tier);
+  return t ? t.maxRuns : 0;
+}
+
+/**
+ * Which CN-direct method to use when the client didn't pick one:
+ * prefer the configured gateway; alipay wins ties (it has a plain
+ * redirect flow, which is the safest default).
+ */
+function defaultCnMethod(): CnMethod | null {
+  if (alipayConfigured()) return 'alipay';
+  if (wechatConfigured()) return 'wechat';
+  if (PAYMENT_MOCK) return 'alipay';
+  return null;
+}
+
+/**
+ * Shared CN-direct checkout: insert the pending payment, then either
+ * build the Alipay gateway redirect URL or create a WeChat Native
+ * (QR) order. Marks the payment failed on provider errors.
+ */
+async function startCnCheckout(opts: {
+  db: any;
+  kind: 'credits' | 'hda';
+  userId: number;
+  tierId: string;
+  amountCents: number;
+  credits?: number;
+  productName: string;
+  /** API origin — server-to-server notify URLs. */
+  origin: string;
+  /** SPA origin — where the user's browser lands after paying. */
+  webOrigin: string;
+  method: CnMethod;
+}): Promise<{ paymentId: number; url?: string; codeUrl?: string }> {
+  const { db, kind, userId, tierId, amountCents, credits, productName, origin, webOrigin, method } = opts;
+  const payment: any = await db.run(
+    `INSERT INTO payments (userId, kind, tier, amountCents, creditsAdded, status, currency, provider)
+     VALUES (?, ?, ?, ?, ?, 'pending', 'cny', ?)`,
+    [userId, kind, tierId, amountCents, credits ?? 0, method]
+  );
+  const paymentId = payment.lastID;
+  const outTradeNo = generateOutTradeNo(paymentId);
+  await db.run(`UPDATE payments SET providerSessionId = ? WHERE id = ?`, [outTradeNo, paymentId]);
+
+  const successUrl = `${webOrigin}/pricing/success?payment_id=${paymentId}&provider=${method}${
+    kind === 'hda' ? '&hda=1' : ''
+  }`;
+  try {
+    if (method === 'alipay') {
+      if (PAYMENT_MOCK && !alipayConfigured()) {
+        return { paymentId, url: `${webOrigin}/api/payments/mock/pay?payment_id=${paymentId}` };
+      }
+      const cfg = alipayConfigFromEnv();
+      if (!cfg) throw new Error('alipay_not_configured');
+      const url = buildAlipayPagePayUrl(cfg, {
+        outTradeNo,
+        totalAmountYuan: (amountCents / 100).toFixed(2),
+        subject: productName,
+        notifyUrl: `${origin}/api/webhooks/alipay`,
+        returnUrl: successUrl,
+      });
+      return { paymentId, url };
+    }
+    // wechat
+    if (PAYMENT_MOCK && !wechatConfigured()) {
+      return {
+        paymentId,
+        codeUrl: `${webOrigin}/api/payments/mock/pay?payment_id=${paymentId}`,
+      };
+    }
+    const cfg = wechatConfigFromEnv();
+    if (!cfg) throw new Error('wechat_not_configured');
+    const codeUrl = await createWechatNativeOrder(cfg, {
+      outTradeNo,
+      totalFen: amountCents,
+      description: productName,
+      notifyUrl: `${origin}/api/webhooks/wechat`,
+    });
+    return { paymentId, codeUrl };
+  } catch (e: any) {
+    console.error(`[checkout/${kind}] ${method} error:`, e?.message || e);
+    await db.run(`UPDATE payments SET status = 'failed' WHERE id = ?`, [paymentId]);
+    throw e;
+  }
+}
 
 /**
  * Resolve a currency value from request body or query. Falls back to USD.
@@ -427,11 +574,13 @@ async function startServer() {
         // ---- Reconcile against the local pending payment BEFORE
         // fulfilling. A signed event is trustworthy, but its metadata must
         // describe a payment we actually created, for this user, still
-        // pending, of the right kind, for the right amount/session.
-        // A mismatch returns 200 (Stripe stops retrying) but NEVER grants
-        // the entitlement — an operator reconciles the row by hand.
+        // pending, for the right amount/session. A mismatch returns 200
+        // (Stripe stops retrying) but NEVER grants the entitlement — an
+        // operator reconciles the row by hand. The entitlement grant itself
+        // (credits / HDA license) lives in fulfilPayment, shared with the
+        // Alipay + WeChat Pay callbacks.
         const payment: any = await db.get(
-          `SELECT id, kind, status, amountCents, currency, providerSessionId, creditsAdded, tier
+          `SELECT id, kind, status, amountCents, currency, providerSessionId
            FROM payments WHERE id = ? AND userId = ?`,
           [paymentId, userId]
         );
@@ -448,69 +597,20 @@ async function startServer() {
           return { dedup: false, warning: 'amount_mismatch' };
         }
 
-        if (kind === 'credits') {
-          const credits = Number(meta.credits || 0);
-          if (payment.creditsAdded != null && credits !== payment.creditsAdded) {
-            return { dedup: false, warning: 'credits_mismatch' };
-          }
-          await db.run(
-            `UPDATE payments SET status = 'completed', completedAt = datetime('now') WHERE id = ?`,
-            [paymentId]
-          );
-          const user: any = await db.get(
-            `SELECT isSubscribed FROM users WHERE id = ?`,
-            [userId]
-          );
-          if (!user?.isSubscribed) {
-            await db.run(
-              `UPDATE users
-                 SET creditsRemaining = creditsRemaining + ?
-               WHERE id = ?`,
-              [credits, userId]
-            );
-          }
-          return { dedup: false, msg: `+${credits} credits to user ${userId}` };
-        } else if (kind === 'hda') {
-          // Validate metadata against the DB's CHECK constraints BEFORE
-          // the INSERT so a malformed Stripe payload returns 4xx (and
-          // gets retried) instead of returning 500 forever. We swallow
-          // the bad event by rolling back (the dedup row goes too, so the
-          // next delivery will retry — but for HDA a human needs to
-          // intervene, so we just 4xx it).
-          const tier = String(meta.tier);
-          const maxRuns = Number(meta.maxRuns || 0);
-          const allowedTiers = new Set(['indie', 'studio', 'sub']);
-          if (
-            !allowedTiers.has(tier) ||
-            !(maxRuns > 0) ||
-            !Number.isFinite(maxRuns)
-          ) {
-            throw new Error(
-              `invalid_hda_metadata: tier=${tier} maxRuns=${maxRuns}`
-            );
-          }
-          if (payment.tier && payment.tier !== tier) {
-            return { dedup: false, warning: 'tier_mismatch' };
-          }
-          const durationDays = Number(meta.durationDays || 365);
-          const expiresAt = new Date(
-            Date.now() + durationDays * 86400 * 1000
-          ).toISOString();
-          const licenseKey = crypto.randomUUID();
-          await db.run(
-            `INSERT INTO licenses (userId, paymentId, key, tier, maxRuns, expiresAt)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [userId, paymentId, licenseKey, tier, maxRuns, expiresAt]
-          );
-          await db.run(
-            `UPDATE payments
-               SET status = 'completed', hdaLicenseKey = ?, completedAt = datetime('now')
-             WHERE id = ?`,
-            [licenseKey, paymentId]
-          );
-          return { dedup: false, msg: `HDA license ${licenseKey} issued to user ${userId}` };
+        const fulfil = await fulfilPayment({
+          db,
+          paymentId,
+          userId,
+          kind,
+          credits: Number(meta.credits || 0),
+          tier: String(meta.tier || ''),
+          maxRuns: Number(meta.maxRuns || 0),
+          durationDays: Number(meta.durationDays || 365),
+        });
+        if (!fulfil.ok) {
+          return { dedup: false, warning: fulfil.warning };
         }
-        return { dedup: false, warning: 'unknown_kind' };
+        return { dedup: false, msg: fulfil.msg };
       };
 
       let result: { dedup: boolean; noop?: boolean; warning?: string; msg?: string } = { dedup: false };
@@ -542,6 +642,149 @@ async function startServer() {
       }
       if (result.msg) console.log('[stripe]', result.msg);
       return res.json({ received: true });
+    }
+  );
+
+  // ----- Alipay async notify (异步通知) -----
+  // Alipay POSTs application/x-www-form-urlencoded and expects the literal
+  // text `success` (anything else is retried for up to 25h). Idempotency:
+  // fulfilPayment's status='pending' guard inside BEGIN IMMEDIATE — repeat
+  // notifies short-circuit as payment_mismatch and still get 'success'.
+  app.post(
+    '/api/webhooks/alipay',
+    express.urlencoded({ extended: false }),
+    async (req: any, res: any) => {
+      const cfg = alipayConfigFromEnv();
+      if (!cfg) return res.status(503).type('text').send('fail');
+      const check = verifyAlipayNotify(cfg, req.body || {});
+      if (!check.ok) {
+        console.warn('[alipay webhook] rejected:', check.reason);
+        return res.status(400).type('text').send('fail');
+      }
+      // Non-paid transitions (e.g. WAIT_BUYER_PAY / closed trades) are
+      // acknowledged so Alipay stops resending them.
+      if (!check.paid) return res.type('text').send('success');
+
+      const payment: any = await db.get(
+        `SELECT id, userId, kind, tier, amountCents, creditsAdded, status
+         FROM payments WHERE providerSessionId = ? AND provider = 'alipay'`,
+        [check.outTradeNo || '']
+      );
+      if (!payment) {
+        console.warn('[alipay webhook] unknown out_trade_no:', check.outTradeNo);
+        return res.type('text').send('success');
+      }
+      if (check.totalAmountFen != null && check.totalAmountFen !== payment.amountCents) {
+        console.warn(
+          `[alipay webhook] amount_mismatch payment=${payment.id} expected=${payment.amountCents} got=${check.totalAmountFen}`
+        );
+        return res.type('text').send('success');
+      }
+      try {
+        await db.exec('BEGIN IMMEDIATE');
+        const fulfil = await fulfilPayment({
+          db,
+          paymentId: payment.id,
+          userId: payment.userId,
+          kind: payment.kind,
+          credits: payment.creditsAdded ?? undefined,
+          tier: payment.tier ?? undefined,
+          // The notify doesn't carry our tier metadata; everything the
+          // fulfilment needs besides tier/maxRuns already lives on the
+          // payments row. maxRuns comes from the PRICING table.
+          maxRuns: maxRunsForTier(db, payment.kind, payment.tier),
+          durationDays: 365,
+        });
+        await db.exec('COMMIT');
+        if (!fulfil.ok) {
+          console.warn('[alipay webhook]', fulfil.warning, check.tradeNo);
+        } else {
+          console.log('[alipay]', fulfil.msg, `trade_no=${check.tradeNo}`);
+        }
+        return res.type('text').send('success');
+      } catch (e: any) {
+        await db.exec('ROLLBACK');
+        console.error('[alipay webhook] failed, rolled back:', e?.message);
+        return res.status(500).type('text').send('fail');
+      }
+    }
+  );
+
+  // ----- WeChat Pay v3 callback (支付结果通知) -----
+  // Raw JSON body + Wechatpay-* signature headers. Verify with the platform
+  // cert matching Wechatpay-Serial, decrypt resource (AES-256-GCM with the
+  // APIv3 key), then fulfil. Respond 200 {"code":"SUCCESS"} to stop retries;
+  // 4xx/5xx make WeChat retry with backoff.
+  app.post(
+    '/api/webhooks/wechat',
+    express.raw({ type: 'application/json' }),
+    async (req: any, res: any) => {
+      const cfg = wechatConfigFromEnv();
+      if (!cfg) return res.status(503).json({ code: 'FAIL', message: 'wechat_not_configured' });
+      const check = await verifyWechatCallback(cfg, req.headers, req.body as Buffer);
+      if (!check.ok) {
+        console.warn('[wechat webhook] rejected:', check.reason);
+        return res.status(401).json({ code: 'FAIL', message: check.reason || 'verify_failed' });
+      }
+      if (check.eventType !== 'TRANSACTION.SUCCESS') {
+        // Other states (REFUND, closed, etc.) — ack without action.
+        return res.json({ code: 'SUCCESS', message: 'ignored_event' });
+      }
+      let payload: any;
+      try {
+        payload = JSON.parse(
+          decryptWechatResource(cfg.apiv3Key, check.resource || {})
+        );
+      } catch (e: any) {
+        console.error('[wechat webhook] decrypt failed:', e?.message);
+        return res.status(400).json({ code: 'FAIL', message: 'decrypt_failed' });
+      }
+      const outTradeNo = String(payload.out_trade_no || '');
+      const paid = payload.trade_state === 'SUCCESS';
+      const paidFen = Number(payload?.amount?.total);
+
+      const payment: any = await db.get(
+        `SELECT id, userId, kind, tier, amountCents, creditsAdded, status
+         FROM payments WHERE providerSessionId = ? AND provider = 'wechat'`,
+        [outTradeNo]
+      );
+      if (!payment) {
+        console.warn('[wechat webhook] unknown out_trade_no:', outTradeNo);
+        return res.json({ code: 'SUCCESS', message: 'unknown_order' });
+      }
+      if (!paid) {
+        return res.json({ code: 'SUCCESS', message: `trade_state_${payload.trade_state}` });
+      }
+      if (Number.isFinite(paidFen) && paidFen !== payment.amountCents) {
+        console.warn(
+          `[wechat webhook] amount_mismatch payment=${payment.id} expected=${payment.amountCents} got=${paidFen}`
+        );
+        return res.json({ code: 'SUCCESS', message: 'amount_mismatch' });
+      }
+      try {
+        await db.exec('BEGIN IMMEDIATE');
+        const fulfil = await fulfilPayment({
+          db,
+          paymentId: payment.id,
+          userId: payment.userId,
+          kind: payment.kind,
+          credits: payment.creditsAdded ?? undefined,
+          tier: payment.tier ?? undefined,
+          maxRuns: maxRunsForTier(db, payment.kind, payment.tier),
+          durationDays: 365,
+        });
+        await db.exec('COMMIT');
+        if (!fulfil.ok) {
+          console.warn('[wechat webhook]', fulfil.warning, payload.transaction_id);
+        } else {
+          console.log('[wechat]', fulfil.msg, `transaction_id=${payload.transaction_id}`);
+        }
+        return res.json({ code: 'SUCCESS' });
+      } catch (e: any) {
+        await db.exec('ROLLBACK');
+        console.error('[wechat webhook] failed, rolled back:', e?.message);
+        return res.status(500).json({ code: 'FAIL', message: 'fulfilment_failed' });
+      }
     }
   );
 
@@ -756,6 +999,15 @@ async function startServer() {
       hda: PRICING[currency].hda,
       currency,
       paymentMethods,
+      // CN-direct gateway availability. When alipay/wechat are configured
+      // (or PAYMENT_MOCK is on in dev), CNY checkout bypasses Stripe
+      // entirely; the UI uses this to pick the right buttons.
+      gateways: {
+        stripe: !!STRIPE_SECRET_KEY,
+        alipay: alipayConfigured(),
+        wechat: wechatConfigured(),
+        mock: PAYMENT_MOCK,
+      },
       // Surface both currencies so the UI can show a small toggle and
       // visitors can self-select. Frontend does NOT auto-flip.
       both: {
@@ -773,11 +1025,42 @@ async function startServer() {
     const currency = resolveCurrency(req.body?.currency);
     const tier = PRICING[currency].credits.find((t) => t.id === tierId);
     if (!tier) return res.status(400).json({ error: 'invalid_tier' });
-    if (!STRIPE_SECRET_KEY) {
+    // CN-direct routing: alipay/wechat only for CNY, and only when the
+    // merchant credentials exist (or PAYMENT_MOCK is on in dev).
+    const cnAvailable = alipayConfigured() || wechatConfigured() || PAYMENT_MOCK;
+    const cnMethod =
+      currency === 'cny' && cnAvailable
+        ? resolveCnMethod(req.body?.method) ?? defaultCnMethod()
+        : null;
+    if (!cnMethod && !STRIPE_SECRET_KEY) {
       return res.status(503).json({
         error: 'stripe_not_configured',
         message: 'Payments are not yet wired up. Set STRIPE_SECRET_KEY in api/.env to test.',
       });
+    }
+    const productName = `HIP Path Doctor — ${tier.name} (${tier.credits} credits)`;
+    if (cnMethod) {
+      try {
+        const out = await startCnCheckout({
+          db,
+          kind: 'credits',
+          userId: req.user.id,
+          tierId: tier.id,
+          amountCents: tier.amount,
+          credits: tier.credits,
+          productName,
+          origin: PUBLIC_ORIGIN || `${req.protocol}://${req.get('host')}`,
+          webOrigin: webOriginOf(req),
+          method: cnMethod,
+        });
+        return res.json(out);
+      } catch (e: any) {
+        const msg = String(e?.message || '');
+        if (msg.includes('not_configured')) {
+          return res.status(503).json({ error: msg, message: `${cnMethod} gateway is not configured.` });
+        }
+        return res.status(502).json({ error: 'cn_gateway_error', message: msg });
+      }
     }
     const payment: any = await db.run(
       `INSERT INTO payments (userId, kind, tier, amountCents, creditsAdded, status, currency)
@@ -785,12 +1068,11 @@ async function startServer() {
       [req.user.id, tier.id, tier.amount, tier.credits, currency]
     );
     const paymentId = payment.lastID;
-    // Use the canonical origin for redirect URLs — never the Host header
-    // (see PUBLIC_ORIGIN above). Dev falls back to the request origin.
-    const origin = PUBLIC_ORIGIN || `${req.protocol}://${req.get('host')}`;
+    // Stripe redirect URLs must land the browser on the SPA.
+    const origin = webOriginOf(req);
     const methods = PAYMENT_METHODS_BY_CURRENCY[currency];
     const lineItemParams = buildLineItemParams(
-      `HIP Path Doctor — ${tier.name} (${tier.credits} credits)`,
+      productName,
       tier.amount,
       currency,
       {
@@ -829,7 +1111,12 @@ async function startServer() {
     const currency = resolveCurrency(req.body?.currency);
     const tier = PRICING[currency].hda.find((t) => t.id === tierId);
     if (!tier) return res.status(400).json({ error: 'invalid_tier' });
-    if (!STRIPE_SECRET_KEY) {
+    const cnAvailable = alipayConfigured() || wechatConfigured() || PAYMENT_MOCK;
+    const cnMethod =
+      currency === 'cny' && cnAvailable
+        ? resolveCnMethod(req.body?.method) ?? defaultCnMethod()
+        : null;
+    if (!cnMethod && !STRIPE_SECRET_KEY) {
       return res.status(503).json({
         error: 'stripe_not_configured',
         message: 'Payments are not yet wired up. Set STRIPE_SECRET_KEY in api/.env to test.',
@@ -841,17 +1128,40 @@ async function startServer() {
         message: `HDA binary not found at ${HDA_FILE_PATH}. Set HDA_FILE_PATH or drop the file there.`,
       });
     }
+    const productName = `yaopc::FolderPathFixed HDA — ${tier.name}`;
+    if (cnMethod) {
+      try {
+        const out = await startCnCheckout({
+          db,
+          kind: 'hda',
+          userId: req.user.id,
+          tierId: tier.id,
+          amountCents: tier.amount,
+          productName,
+          origin: PUBLIC_ORIGIN || `${req.protocol}://${req.get('host')}`,
+          webOrigin: webOriginOf(req),
+          method: cnMethod,
+        });
+        return res.json(out);
+      } catch (e: any) {
+        const msg = String(e?.message || '');
+        if (msg.includes('not_configured')) {
+          return res.status(503).json({ error: msg, message: `${cnMethod} gateway is not configured.` });
+        }
+        return res.status(502).json({ error: 'cn_gateway_error', message: msg });
+      }
+    }
     const payment: any = await db.run(
       `INSERT INTO payments (userId, kind, tier, amountCents, status, currency)
        VALUES (?, 'hda', ?, ?, 'pending', ?)`,
       [req.user.id, tier.id, tier.amount, currency]
     );
     const paymentId = payment.lastID;
-    // Use the canonical origin for redirect URLs — never the Host header.
-    const origin = PUBLIC_ORIGIN || `${req.protocol}://${req.get('host')}`;
+    // Stripe redirect URLs must land the browser on the SPA.
+    const origin = webOriginOf(req);
     const methods = PAYMENT_METHODS_BY_CURRENCY[currency];
     const lineItemParams = buildLineItemParams(
-      `yaopc::FolderPathFixed HDA — ${tier.name}`,
+      productName,
       tier.amount,
       currency,
       {
@@ -886,15 +1196,28 @@ async function startServer() {
   });
 
   // ----- Success page metadata (used by /pricing/success to render the
-  // right confirmation: "credits added" vs "HDA license ready to download") -----
+  // right confirmation: "credits added" vs "HDA license ready to download")
+  // Accepts either `?session_id=` (Stripe redirect) or `?payment_id=`
+  // (Alipay/WeChat return / CN-direct polling). -----
   app.get('/api/payments/lookup', requireAuth, async (req: any, res: any) => {
     const sessionId = String(req.query.session_id || '');
-    if (!sessionId) return res.status(400).json({ error: 'missing_session_id' });
-    const row: any = await db.get(
-      `SELECT id, kind, tier, creditsAdded, hdaLicenseKey, status, amountCents
-       FROM payments WHERE providerSessionId = ? AND userId = ?`,
-      [sessionId, req.user.id]
-    );
+    const paymentIdRaw = String(req.query.payment_id || '');
+    if (!sessionId && !paymentIdRaw) return res.status(400).json({ error: 'missing_session_id' });
+    const paymentId = parseInt(paymentIdRaw, 10);
+    if (!sessionId && !Number.isFinite(paymentId)) {
+      return res.status(400).json({ error: 'invalid_payment_id' });
+    }
+    const row: any = sessionId
+      ? await db.get(
+          `SELECT id, kind, tier, creditsAdded, hdaLicenseKey, status, amountCents
+           FROM payments WHERE providerSessionId = ? AND userId = ?`,
+          [sessionId, req.user.id]
+        )
+      : await db.get(
+          `SELECT id, kind, tier, creditsAdded, hdaLicenseKey, status, amountCents
+           FROM payments WHERE id = ? AND userId = ?`,
+          [paymentId, req.user.id]
+        );
     if (!row) return res.status(404).json({ error: 'not_found' });
     // If it's an HDA purchase, also build a one-time signed download URL.
     let downloadUrl: string | null = null;
@@ -947,6 +1270,81 @@ async function startServer() {
       downloadUrl,
     });
   });
+
+  // ----- Payment status (WeChat QR polling) -----
+  // Lightweight owner-scoped poll: the QR modal checks every ~2s until the
+  // wechat callback flips the row to 'completed'.
+  app.get('/api/payments/:id/status', requireAuth, async (req: any, res: any) => {
+    const id = parseInt(String(req.params.id || ''), 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'invalid_payment_id' });
+    const row: any = await db.get(
+      `SELECT id, kind, status FROM payments WHERE id = ? AND userId = ?`,
+      [id, req.user.id]
+    );
+    if (!row) return res.status(404).json({ error: 'not_found' });
+    res.json({ id: row.id, kind: row.kind, status: row.status });
+  });
+
+  // ----- Mock CN cashier (PAYMENT_MOCK=1, dev only) -----
+  // Stands in for the Alipay hosted page / WeChat QR so the full
+  // pending → notify → fulfil → success flow runs without merchant
+  // accounts. Never registered in production.
+  if (PAYMENT_MOCK) {
+    // Fake cashier: what the QR "contains" / where Alipay would redirect.
+    app.get('/api/payments/mock/pay', async (req: any, res: any) => {
+      const id = parseInt(String(req.query.payment_id || ''), 10);
+      const row: any = await db.get(
+        `SELECT id, kind, tier, amountCents, status FROM payments WHERE id = ?`,
+        [id]
+      );
+      if (!row) return res.status(404).send('unknown payment');
+      res.type('html').send(`<!doctype html><html lang="zh"><meta charset="utf-8">
+<title>模拟收银台</title>
+<body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#f7f5f0">
+  <div style="background:#fff;padding:40px 48px;border-radius:16px;box-shadow:0 10px 40px rgba(0,0,0,.08);text-align:center">
+    <p style="color:#8a8278;font-size:13px;margin:0 0 4px">PAYMENT_MOCK 模拟收银台</p>
+    <p style="font-size:28px;font-weight:600;margin:0 0 4px">¥${(row.amountCents / 100).toFixed(2)}</p>
+    <p style="color:#8a8278;font-size:13px;margin:0 0 24px">订单 #${row.id} · ${row.kind} · ${row.tier} · ${row.status}</p>
+    <a href="/api/payments/mock/notify?payment_id=${row.id}" style="display:inline-block;background:#1677ff;color:#fff;text-decoration:none;padding:10px 32px;border-radius:999px;font-size:14px">模拟支付成功</a>
+  </div>
+</body>`);
+    });
+
+    // Fake provider notify: same fulfilment contract as the real webhooks
+    // (amount from the payments row, pending-guard, transaction), then
+    // redirect to the success page like Alipay's return_url would.
+    app.get('/api/payments/mock/notify', async (req: any, res: any) => {
+      const id = parseInt(String(req.query.payment_id || ''), 10);
+      const row: any = await db.get(`SELECT * FROM payments WHERE id = ?`, [id]);
+      if (!row) return res.status(404).send('unknown payment');
+      if (row.status === 'pending') {
+        try {
+          await db.exec('BEGIN IMMEDIATE');
+          const fulfil = await fulfilPayment({
+            db,
+            paymentId: row.id,
+            userId: row.userId,
+            kind: row.kind,
+            credits: row.creditsAdded ?? undefined,
+            tier: row.tier ?? undefined,
+            maxRuns: maxRunsForTier(db, row.kind, row.tier),
+            durationDays: 365,
+          });
+          await db.exec('COMMIT');
+          if (!fulfil.ok) console.warn('[mock pay]', fulfil.warning);
+        } catch (e: any) {
+          await db.exec('ROLLBACK');
+          console.error('[mock pay] fulfilment failed:', e?.message);
+          return res.status(500).send('fulfilment_failed');
+        }
+      }
+      res.redirect(
+        `${webOriginOf(req)}/pricing/success?payment_id=${row.id}&provider=${row.provider}${
+          row.kind === 'hda' ? '&hda=1' : ''
+        }`
+      );
+    });
+  }
 
   // ----- HDA download (signed URL) -----
   app.get('/api/hda/download', async (req: any, res: any) => {
