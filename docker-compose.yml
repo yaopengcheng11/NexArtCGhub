@@ -1,0 +1,61 @@
+# ============================================================
+# cg-resource-hub 生产部署
+# 用法:
+#   1. cp .env.example .env  &&  编辑 .env 填密钥
+#   2. docker compose pull   # 拉镜像(可选,Dockerfile build 也行)
+#   3. docker compose up -d
+# ============================================================
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cg-resource-hub:latest
+    container_name: cg-resource-hub
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8788}:8788"
+    environment:
+      NODE_ENV: production
+      PORT: "8788"
+      CORS_ORIGIN: "${CORS_ORIGIN:-*}"
+      TRUST_PROXY: "1"
+      JWT_SECRET: "${JWT_SECRET:?must be set}"
+      ADMIN_USERNAME: "${ADMIN_USERNAME:?must be set}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:?must be set}"
+      SQLITE_DB_PATH: /app/api/data/database.sqlite
+      DATA_ROOT: /app/api/data
+      # 在线工具相关(可选项)
+      HOUDINI_PATH: "${HOUDINI_PATH:-}"
+      BLENDER_PATH: "${BLENDER_PATH:-}"
+      PYTHON_PATH: "${PYTHON_PATH:-python3}"
+      MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-50}"
+      HYTHON_TIMEOUT_MS: "${HYTHON_TIMEOUT_MS:-600000}"
+    volumes:
+      # SQLite 数据库:持久化到宿主机(关键数据,绝对不能丢)
+      - ./api/data:/app/api/data
+      # 用户工具上传临时区(在线工具跑 hython 的产物,体积可能很大)
+      - ./data/tools_uploads:/app/api/data/tools_uploads
+      # 注意:真正的资源文件(9.5GB blend_assets)不在服务器上,
+      # 走百度网盘分发,服务器 DB 只存 fileUrl + panCode
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8788/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # 资源限制(2G 内存机器上把内存卡死,避免 OOM 拖死整机)
+    deploy:
+      resources:
+        limits:
+          memory: 1500M   # 给 OS/docker 留 500M
+          cpus: "1.5"
+        reservations:
+          memory: 512M
+          cpus: "0.5"
