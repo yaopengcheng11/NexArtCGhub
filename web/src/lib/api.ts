@@ -106,17 +106,35 @@ export async function apiFetch<T = unknown>(
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  // Combine the internal timeout with any caller-provided signal —
-  // previously a caller signal was silently overwritten by ours.
-  init.signal = callerSignal
-    ? (AbortSignal as any).any
-      ? (AbortSignal as any).any([controller.signal, callerSignal])
-      : controller.signal
-    : controller.signal;
+  // Combine the internal timeout with any caller-provided signal.
+  // `AbortSignal.any` is cleanest but not universal yet — in the fallback
+  // we manually forward the caller's abort into our controller so a
+  // caller cancellation is never silently dropped.
+  let callerAbortListener: (() => void) | null = null;
+  if (callerSignal && (AbortSignal as any).any) {
+    init.signal = (AbortSignal as any).any([controller.signal, callerSignal]);
+  } else {
+    if (callerSignal) {
+      if (callerSignal.aborted) {
+        controller.abort();
+      } else {
+        callerAbortListener = () => controller.abort();
+        callerSignal.addEventListener('abort', callerAbortListener, { once: true });
+      }
+    }
+    init.signal = controller.signal;
+  }
+  const cleanup = () => {
+    clearTimeout(timer);
+    if (callerAbortListener && callerSignal) {
+      callerSignal.removeEventListener('abort', callerAbortListener);
+      callerAbortListener = null;
+    }
+  };
 
   try {
     const res = await fetch(url, init);
-    clearTimeout(timer);
+    cleanup();
 
     // Binary response type: return the Blob untouched. Error responses
     // still go through the JSON error path below (the server always
@@ -172,7 +190,7 @@ export async function apiFetch<T = unknown>(
     }
     return { ok: true, status: res.status, data: data as T };
   } catch (e: any) {
-    clearTimeout(timer);
+    cleanup();
     if (e?.name === 'AbortError') {
       return { ok: false, status: 0, error: 'timeout' };
     }

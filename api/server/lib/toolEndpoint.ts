@@ -135,6 +135,22 @@ export function createToolEndpoint(spec: ToolEndpointSpec) {
       }
     }
 
+    // Availability checks BEFORE the credit gate — never charge a user
+    // for a run we already know can't start (missing hython or script
+    // would otherwise debit credits on every request).
+    if (!fs.existsSync(spec.hythonPath)) {
+      rmDirSafe(tmpDir);
+      return res.status(503).json({
+        error: 'Houdini hython.exe is not available on this server. Set HYTHON_PATH env to fix.',
+      });
+    }
+    if (!fs.existsSync(spec.scriptPath)) {
+      rmDirSafe(tmpDir);
+      return res.status(503).json({
+        error: `${spec.scriptPath.split(/[\\/]/).pop()} is missing. Check api/tools/ directory.`,
+      });
+    }
+
     // Credit gate — atomic decrement BEFORE spawning. This is the
     // single source of truth: if the UPDATE returns 0 changes, no
     // concurrent request beat us to the last credit and we must refuse.
@@ -192,19 +208,6 @@ export function createToolEndpoint(spec: ToolEndpointSpec) {
     const outMdPath = spec.outputMdPath?.(ctx);
 
     const args = spec.buildArgs(ctx);
-
-    if (!fs.existsSync(spec.hythonPath)) {
-      rmDirSafe(tmpDir);
-      return res.status(503).json({
-        error: 'Houdini hython.exe is not available on this server. Set HYTHON_PATH env to fix.',
-      });
-    }
-    if (!fs.existsSync(spec.scriptPath)) {
-      rmDirSafe(tmpDir);
-      return res.status(503).json({
-        error: `${spec.scriptPath.split(/[\\/]/).pop()} is missing. Check api/tools/ directory.`,
-      });
-    }
 
     let stdoutBuf = '';
     let stderrBuf = '';
@@ -310,7 +313,31 @@ export function createToolEndpoint(spec: ToolEndpointSpec) {
       }
       stdoutBuf += b.toString('utf-8');
     });
-    child.stderr.on('data', (b: Buffer) => { stderrBuf += b.toString('utf-8'); });
+    let stderrBytes = 0;
+    child.stderr.on('data', (b: Buffer) => {
+      stderrBytes += b.length;
+      const maxBytes = spec.maxStdoutBytes ?? 50 * 1024 * 1024;
+      if (stderrBytes > maxBytes) {
+        // Mirror of the stdout cap: a runaway stderr also means the tool
+        // is misbehaving — kill, refund, and report instead of letting
+        // the buffer grow until the API runs out of memory.
+        settle(() => {
+          killTree();
+          if (!res.headersSent) {
+            if (chargedChanges > 0) {
+              reqDb.run(
+                `UPDATE users SET creditsRemaining = creditsRemaining + 1 WHERE id = ?`,
+                [user.id]
+              ).catch(() => undefined);
+            }
+            res.status(502).json({ error: 'tool_output_too_large' });
+            rmDirSafe(tmpDir);
+          }
+        });
+        return;
+      }
+      stderrBuf += b.toString('utf-8');
+    });
 
     child.on('error', (err) => {
       settle(() => {

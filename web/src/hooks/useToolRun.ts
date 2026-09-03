@@ -170,12 +170,25 @@ export function useToolRun<E extends Record<string, string> = Record<string, str
           return fd;
         });
         const form = build(file, extras);
-        const r = await fetch(opts.endpoint, {
-          method: 'POST',
-          body: form,
-          credentials: 'include',
-          signal: AbortSignal.timeout(opts.timeoutMs ?? 5 * 60_000),
-        });
+        // Manual timeout controller — AbortSignal.timeout() isn't
+        // available in every browser/WebView, and on abort we want a
+        // consistent AbortError we can map to the "took too long" text.
+        const controller = new AbortController();
+        const timer = setTimeout(
+          () => controller.abort(),
+          opts.timeoutMs ?? 5 * 60_000
+        );
+        let r: Response;
+        try {
+          r = await fetch(opts.endpoint, {
+            method: 'POST',
+            body: form,
+            credentials: 'include',
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timer);
+        }
         if (!r.ok) {
           let msg = `HTTP ${r.status}`;
           try {

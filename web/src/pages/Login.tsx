@@ -22,12 +22,19 @@ export default function Login() {
     if (loading) return;
     if (user) {
       const state = location.state as { from?: string } | null;
-      const dest =
-        state?.from && state.from !== '/login'
-          ? state.from
-          : user.role === 'admin'
-            ? '/admin'
-            : '/';
+      // Only honor internal single-slash paths. `from` currently comes
+      // from ProtectedRoute, but constraining it here keeps any future
+      // in-app caller from turning this into an open redirect (e.g.
+      // "//evil.com" or "https://evil.com").
+      const from = state?.from;
+      const safeFrom =
+        typeof from === 'string' &&
+        from !== '/login' &&
+        from.startsWith('/') &&
+        !from.startsWith('//')
+          ? from
+          : null;
+      const dest = safeFrom ?? (user.role === 'admin' ? '/admin' : '/');
       navigate(dest, { replace: true });
     }
   }, [user, loading, location.state, navigate]);
