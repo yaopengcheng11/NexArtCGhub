@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>收款上线路线图 — 个体户 · ICP 备案 · 支付宝 / 微信直连</title>
+<style>
+  :root {
+    --bg: #f2efe8;
+    --card: #fbfaf6;
+    --ink: #1a1814;
+    --soft: #4a453e;
+    --muted: #8a8278;
+    --faint: #c5bfb1;
+    --accent: #a8806b;
+    --accent-soft: rgba(168, 128, 107, 0.12);
+    --hair: rgba(26, 24, 20, 0.08);
+    --green: #4a7c59;
+    --blue: #1677ff;
+    --wechat: #07c160;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Inter", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.75;
+    -webkit-font-smoothing: antialiased;
+    padding: 48px 20px 80px;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  /* ── header ─────────────────────────────── */
+  .micro {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 11px;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  h1 {
+    font-family: Georgia, "Songti SC", "STSong", "SimSun", serif;
+    font-weight: 500;
+    font-size: 34px;
+    letter-spacing: -0.02em;
+    line-height: 1.25;
+    margin: 10px 0 8px;
+  }
+  .lede { color: var(--soft); font-weight: 300; max-width: 640px; }
+  .meta {
+    display: flex; gap: 16px; flex-wrap: wrap;
+    margin-top: 18px;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 11px; letter-spacing: 0.12em; color: var(--muted);
+  }
+  .meta span { border: 1px solid var(--hair); border-radius: 999px; padding: 4px 12px; background: rgba(251,250,246,0.7); }
+  /* ── overview strip ─────────────────────── */
+  .strip {
+    display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px;
+    margin: 36px 0 8px;
+  }
+  .strip .node {
+    background: var(--card);
+    border: 1px solid var(--hair);
+    border-radius: 16px;
+    padding: 14px 14px 12px;
+    position: relative;
+  }
+  .strip .num {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 11px; color: var(--accent); letter-spacing: 0.2em;
+  }
+  .strip .t { font-weight: 600; font-size: 14px; margin: 4px 0 2px; }
+  .strip .d { font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+  .strip .dur {
+    display: inline-block; margin-top: 8px;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 10px; letter-spacing: 0.08em;
+    color: var(--accent); background: var(--accent-soft);
+    border-radius: 999px; padding: 2px 10px;
+  }
+  /* ── sections ───────────────────────────── */
+  section {
+    background: var(--card);
+    border: 1px solid var(--hair);
+    border-radius: 24px;
+    padding: 32px 36px;
+    margin-top: 28px;
+    box-shadow: 0 1px 0 rgba(26,24,20,0.03), 0 20px 50px -25px rgba(26,24,20,0.10);
+  }
+  section h2 {
+    font-family: Georgia, "Songti SC", "STSong", "SimSun", serif;
+    font-weight: 500; font-size: 22px; letter-spacing: -0.01em;
+    margin: 6px 0 4px;
+  }
+  section .why { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
+  ol.steps { list-style: none; counter-reset: s; }
+  ol.steps > li {
+    counter-increment: s;
+    position: relative;
+    padding: 14px 0 14px 52px;
+    border-top: 1px solid var(--hair);
+  }
+  ol.steps > li:first-child { border-top: none; }
+  ol.steps > li::before {
+    content: counter(s, decimal-leading-zero);
+    position: absolute; left: 0; top: 16px;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 12px; color: var(--accent); letter-spacing: 0.1em;
+  }
+  ol.steps .h { font-weight: 600; }
+  ol.steps .b { font-size: 13.5px; color: var(--soft); margin-top: 2px; }
+  ul.tick { list-style: none; margin-top: 8px; }
+  ul.tick li {
+    padding-left: 24px; position: relative;
+    font-size: 13.5px; color: var(--soft);
+    margin-top: 6px;
+  }
+  ul.tick li::before {
+    content: "☐"; position: absolute; left: 0; color: var(--accent);
+  }
+  .tag {
+    display: inline-block; font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+    border-radius: 999px; padding: 2px 10px; margin-left: 8px; vertical-align: 2px;
+  }
+  .tag.online { color: var(--green); background: rgba(74,124,89,0.10); }
+  .tag.wait { color: var(--accent); background: var(--accent-soft); }
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: rgba(168,128,107,0.06);
+    border-radius: 0 14px 14px 0;
+    padding: 14px 18px;
+    font-size: 13.5px; color: var(--soft);
+    margin-top: 18px;
+  }
+  .callout strong { color: var(--ink); }
+  /* ── tables ─────────────────────────────── */
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 13.5px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--hair); vertical-align: top; }
+  th {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 10.5px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--muted); font-weight: 400;
+  }
+  td b { font-weight: 600; }
+  .good { color: var(--green); } .bad { color: #b4543f; } .mid { color: var(--accent); }
+  /* ── code ───────────────────────────────── */
+  pre {
+    background: #262320; color: #ece6da;
+    border-radius: 14px; padding: 18px 20px;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 12.5px; line-height: 1.7;
+    overflow-x: auto; margin-top: 16px;
+  }
+  pre .c { color: #9a917f; }
+  pre .k { color: #d4b896; }
+  /* ── footer ─────────────────────────────── */
+  footer {
+    margin-top: 36px; text-align: center;
+    color: var(--faint); font-size: 12px; line-height: 1.9;
+  }
+  footer .micro { color: var(--faint); }
+  @media (max-width: 720px) {
+    .strip { grid-template-columns: 1fr 1fr; }
+    section { padding: 24px 20px; }
+    body { padding: 28px 14px 60px; }
+    h1 { font-size: 26px; }
+  }
+  @media print {
+    body { padding: 0; background: #fff; }
+    section { box-shadow: none; break-inside: avoid; border-color: #ddd; }
+    .strip .node { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <p class="micro">/ Roadmap · Payments Go-Live</p>
+    <h1>收款上线路线图</h1>
+    <p class="lede">
+      从「个体工商户营业执照」到「支付宝 / 微信扫码真实到账」的完整路径。按顺序走完五步即可，
+      代码侧已全部就绪（<code>cg-resource-hub</code> 支付模块 + mock 收银台），只差资质与密钥。
+    </p>
+    <div class="meta">
+      <span>北京 · 2026-09</span>
+      <span>全程约 3 – 5 周</span>
+      <span>大头是 ICP 备案等待</span>
+      <span>政策截至 2026-09，以官方最新为准</span>
+    </div>
+  </header>
+
+  <div class="strip">
+    <div class="node">
+      <div class="num">01</div>
+      <div class="t">办个体户</div>
+      <div class="d">e 窗通全程线上，网店地址方案免实体场地</div>
+      <span class="dur">1–3 天</span>
+    </div>
+    <div class="node">
+      <div class="num">02</div>
+      <div class="t">ICP 备案</div>
+      <div class="d">域名备案主体变更到个体户名下</div>
+      <span class="dur">2–4 周</span>
+    </div>
+    <div class="node">
+      <div class="num">03</div>
+      <div class="t">支付宝签约</div>
+      <div class="d">开放平台自研应用 + 电脑网站支付</div>
+      <span class="dur">1–5 天</span>
+    </div>
+    <div class="node">
+      <div class="num">04</div>
+      <div class="t">微信商户号</div>
+      <div class="d">个体户通道 + Native 扫码权限</div>
+      <span class="dur">3–10 天</span>
+    </div>
+    <div class="node">
+      <div class="num">05</div>
+      <div class="t">配置验收</div>
+      <div class="d">填 env、关 mock、真实小额支付验证</div>
+      <span class="dur">半天</span>
+    </div>
+  </div>
+
+  <!-- ═══════════════ Phase 1 ═══════════════ -->
+  <section>
+    <p class="micro">/ Phase 01</p>
+    <h2>办理个体工商户营业执照 <span class="tag online">全程线上</span></h2>
+    <p class="why">所有支付渠道的准入前提。北京支持非京籍办理，难点只在注册地址。</p>
+    <ol class="steps">
+      <li>
+        <div class="h">解决注册地址（二选一）</div>
+        <div class="b">北京要求经营场所为<b>非住宅规划用途</b>的固定场所，住宅不能注册。纯线上业务走：</div>
+        <ul class="tick">
+          <li><b>网店地址方案（推荐）</b>：在北京市公示的九个电商平台（淘宝 / 拼多多等）开设网店，
+              下载「网络经营场所使用证明」，用它作为经营场所登记，无需实体店面；
+              <b>外地来京人员需持北京居住证（卡）</b></li>
+          <li><b>园区 / 集中办公区地址</b>：部分园区提供收费注册地址（公司用得多，个体户也可咨询）</li>
+        </ul>
+      </li>
+      <li>
+        <div class="h">北京市企业服务 e 窗通提交设立登记</div>
+        <div class="b">搜索「个体工商户开办」一件事；准备：身份证、经营场所证明、经营范围
+            （建议含 <b>软件开发；数字文化创意内容应用服务；互联网销售</b> 等）</div>
+      </li>
+      <li>
+        <div class="h">领照 + 收款卡</div>
+        <div class="b">执照 1–3 个工作日下发。个体户可用<b>经营者本人银行卡</b>收款
+            （微信支付明确支持法人对私账户，不强制开对公户）</div>
+      </li>
+    </ol>
+    <div class="callout">
+      <strong>经营范围别写窄。</strong>后续支付宝签约要看网站经营内容与执照一致性，
+      覆盖「软件开发 / 信息服务 / 互联网销售」能避免二次变更。
+    </div>
+  </section>
+
+  <!-- ═══════════════ Phase 2 ═══════════════ -->
+  <section>
+    <p class="micro">/ Phase 02</p>
+    <h2>ICP 备案：主体变更到个体户 <span class="tag wait">整条链路的等待大头</span></h2>
+    <p class="why">支付宝与微信均要求：网站可正常访问、经营内容完整、<b>备案主体与支付签约主体一致</b>。</p>
+    <ol class="steps">
+      <li>
+        <div class="h">确认现状</div>
+        <div class="b">若域名当前为个人备案 → 办理「主体变更 / 注销重备」到个体户名下（在服务器所在云的备案系统操作：
+            阿里云 beian.aliyun.com / 腾讯云 console.cloud.tencent.com/beijing）</div>
+      </li>
+      <li>
+        <div class="h">提交材料</div>
+        <div class="b">个体户营业执照、经营者身份证、核验（人脸 / 幕布，按管局要求）、网站信息
+            （名称、服务内容 — 选「其他信息服务 / 信息技术」类）</div>
+      </li>
+      <li>
+        <div class="h">等待管局审核</div>
+        <div class="b">云初审 1–2 天 + 管局审核最长 20 个工作日（北京通常 1–2 周出结果）。
+            <b>期间保持备案负责人电话畅通</b>，驳回常见原因：网站名称含商用词、内容与主体不符</div>
+      </li>
+    </ol>
+    <div class="callout">
+      备案期间网站可正常访问（主体变更情形），但<b>支付签约必须等备案通过</b>——
+      所以这一步越早启动越好，Phase 3 / 4 的材料可以并行准备。
+    </div>
+  </section>
+
+  <!-- ═══════════════ Phase 3 ═══════════════ -->
+  <section>
+    <p class="micro">/ Phase 03</p>
+    <h2>支付宝开放平台：电脑网站支付 <span class="tag online">支持个体户</span></h2>
+    <p class="why">CNY 区的默认支付方式（跳转支付宝收银台，人民币直结到你的账户）。</p>
+    <ol class="steps">
+      <li>
+        <div class="h">注册开放平台账号并完成企业认证</div>
+        <div class="b">open.alipay.com → 入驻 → 主体选<b>个体工商户</b>，用营业执照 + 经营者支付宝账号实名</div>
+      </li>
+      <li>
+        <div class="h">创建自研应用，签约「电脑网站支付」</div>
+        <div class="b">填写应用名称 / 图标 / 网址（你的备案域名）；签约时网站需展示完整经营内容与商品信息
+            （定价页已有：credits 档位 + HDA license）</div>
+      </li>
+      <li>
+        <div class="h">配置接口加签（RSA2）</div>
+        <div class="b">用支付宝密钥工具生成应用密钥对 → 上传<b>应用公钥</b> → 平台生成<b>支付宝公钥</b>。
+            保存：<b>应用私钥</b>（填 ALIPAY_PRIVATE_KEY）与<b>支付宝公钥</b>（填 ALIPAY_PUBLIC_KEY，
+            注意不是你的应用公钥）</div>
+      </li>
+      <li>
+        <div class="h">回填 <code>api/.env</code></div>
+        <div class="b">回调地址无需在平台配置，下单时已携带：<code>https://你的域名/api/webhooks/alipay</code></div>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ═══════════════ Phase 4 ═══════════════ -->
+  <section>
+    <p class="micro">/ Phase 04</p>
+    <h2>微信支付商户号：Native 扫码 <span class="tag online">支持个体户</span></h2>
+    <p class="why">PC 网站扫码支付，前端自动弹二维码并轮询支付结果。</p>
+    <ol class="steps">
+      <li>
+        <div class="h">申请商户号（个体户通道）</div>
+        <div class="b">pay.weixin.qq.com → 接入微信支付；材料：营业执照彩色扫描、经营者身份证、
+            银行账户（<b>对公或经营者对私均可</b>）</div>
+      </li>
+      <li>
+        <div class="h">开通 Native 支付产品</div>
+        <div class="b">商户平台 → 产品中心 → Native 支付 → 开通（≤7 个工作日）；
+            需要一个<b>已备案的自有网站</b>（Phase 02 的成果）</div>
+      </li>
+      <li>
+        <div class="h">API 安全三件套</div>
+        <div class="b">申请 API 证书 → 记录<b>证书序列号</b>（WXPAY_SERIAL_NO）、
+            下载 <b>apiclient_key.pem</b>（WXPAY_PRIVATE_KEY）、设置 <b>APIv3 密钥</b>（WXPAY_APIV3_KEY，32 位）；
+            平台证书代码会自动拉取缓存，无需手动配置</div>
+      </li>
+      <li>
+        <div class="h">绑定 APPID 并回填 env</div>
+        <div class="b">绑定一个公众号 / 开放平台应用 APPID（WXPAY_APPID）；
+            回调地址固定为 <code>https://你的域名/api/webhooks/wechat</code></div>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ═══════════════ Phase 5 ═══════════════ -->
+  <section>
+    <p class="micro">/ Phase 05</p>
+    <h2>配置上线与验收 <span class="tag online">半天搞定</span></h2>
+    <p class="why">三家渠道共用同一套订单 / 发货体系，填好密钥重启即从 mock 切换到真实网关。</p>
+    <pre>
+<span class="c"># api/.env — 生产</span>
+<span class="k">PUBLIC_ORIGIN</span>=https://你的域名        <span class="c"># 回调与跳转的根（必填）</span>
+<span class="c">#FRONTEND_ORIGIN=…                   # 仅前后端分离部署时需要</span>
+
+<span class="k">ALIPAY_APP_ID</span>=2021…
+<span class="k">ALIPAY_PRIVATE_KEY</span>=MIIEvQ…            <span class="c"># 应用私钥（PKCS8）</span>
+<span class="k">ALIPAY_PUBLIC_KEY</span>=MIIBIjANBg…        <span class="c"># 支付宝公钥</span>
+
+<span class="k">WXPAY_MCHID</span>=19000…
+<span class="k">WXPAY_APPID</span>=wx…
+<span class="k">WXPAY_SERIAL_NO</span>=5157F0…
+<span class="k">WXPAY_PRIVATE_KEY</span>=/srv/secrets/apiclient_key.pem
+<span class="k">WXPAY_APIV3_KEY</span>=32位字符串…
+
+<span class="c">#PAYMENT_MOCK=1                      # ⚠️ 生产绝不开启（且 prod 自动拒绝）</span></pre>
+    <ul class="tick">
+      <li>重启 API 后，CNY 定价页出现「支付宝 / 微信支付」两个入口（mock 入口消失）</li>
+      <li>真实支付最小档验证：¥35 Starter 走一遍支付宝、一遍微信扫码</li>
+      <li>确认：用户积分到账、<code>payments</code> 表该行 <code>status=completed</code>、
+          商户后台能看到交易并可对账</li>
+      <li>故意断网 / 等待 5 分钟后再支付，确认回调幂等（积分不会重复增加）</li>
+      <li>订单流程试一笔 HDA license（¥169 个人版），确认签名下载链接可用</li>
+    </ul>
+  </section>
+
+  <!-- ═══════════════ Appendix A ═══════════════ -->
+  <section>
+    <p class="micro">/ Appendix A</p>
+    <h2>税费优惠与补贴速查（北京 · 2026）</h2>
+    <p class="why">最值钱的是国家层面的税费减免（个体户直接享受），市级补贴以贴息贷款和小额一次性补贴为主。</p>
+    <table>
+      <tr><th>项目</th><th>内容</th><th>条件 / 截止</th></tr>
+      <tr>
+        <td><b>增值税免征</b></td>
+        <td>小规模纳税人月销售额 ≤10 万免征；超过部分 3% 减按 <b>1%</b></td>
+        <td class="good">政策延续至 2027-12-31</td>
+      </tr>
+      <tr>
+        <td><b>经营所得个税减半</b></td>
+        <td>年应纳税所得额 ≤200 万的部分减半征收，可叠加其他优惠</td>
+        <td class="good">政策延续至 2027-12-31</td>
+      </tr>
+      <tr>
+        <td><b>「六税两费」减半</b></td>
+        <td>资源税、城建税、房产税、城镇土地使用税、印花税、耕地占用税 + 教育费附加、地方教育附加</td>
+        <td class="good">至 2027-12-31</td>
+      </tr>
+      <tr>
+        <td><b>创业担保贷款（北京）</b></td>
+        <td>个人最高 <b>50 万</b>、最长 3 年，财政贴息（自付 LPR−150BP 以下部分）</td>
+        <td>在本市注册经营、资信良好；是<b>贴息贷款</b>不是补贴</td>
+      </tr>
+      <tr>
+        <td><b>一次性创业补贴（北京）</b></td>
+        <td><b>8000 元</b>，招用本市户籍劳动力可加，封顶 1 万</td>
+        <td class="bad">首次创办 + <b>本人以该组织名义缴社保满 6 个月</b> + 纳税满 1 年；
+            非京籍灵活就业参保受限，较难满足</td>
+      </tr>
+      <tr>
+        <td><b>高新认定 / 专精特新奖励</b></td>
+        <td>部分区一次性 10–30 万 + 企业所得税 15%</td>
+        <td class="bad">需<b>公司</b>主体 + 知识产权 + 研发费用归集 — 未来升级公司后再够</td>
+      </tr>
+    </table>
+  </section>
+
+  <!-- ═══════════════ Appendix B ═══════════════ -->
+  <section>
+    <p class="micro">/ Appendix B</p>
+    <h2>个体户 vs 一人有限公司：怎么选</h2>
+    <table>
+      <tr><th>维度</th><th>个体工商户</th><th>一人有限公司</th></tr>
+      <tr>
+        <td><b>所得税</b></td>
+        <td class="good">经营所得 5%–35% 累进 + 200 万内减半；<b>无分红税</b></td>
+        <td class="mid">企业所得税（小微利实际 ≈5%）+ 分红 20% 个税</td>
+      </tr>
+      <tr>
+        <td><b>出资</b></td>
+        <td class="good">无实缴要求</td>
+        <td class="bad">注册资本 5 年内实缴（新《公司法》2024.7.1）</td>
+      </tr>
+      <tr>
+        <td><b>责任</b></td>
+        <td class="bad">无限责任</td>
+        <td class="mid">有限责任，但<b>不能证明财产独立时承担连带责任</b>（举证责任在股东）</td>
+      </tr>
+      <tr>
+        <td><b>维护成本</b></td>
+        <td class="good">极低，记账简单</td>
+        <td class="mid">代理记账约 200–400 元/月，注销复杂</td>
+      </tr>
+      <tr>
+        <td><b>升级空间</b></td>
+        <td class="bad">雇人、高新认定、融资、部分平台入驻受限</td>
+        <td class="good">全部可用</td>
+      </tr>
+    </table>
+    <div class="callout">
+      <strong>结论：</strong>年利润几十万以内 → 个体户到手更多、省心；
+      利润稳定超过约 70 万、要雇人 / 申请高新 / 对外融资 → 再设公司。
+      若担心一人公司限制，可注册普通有限公司（家人挂 1% 股权）绕开特别规定；
+      注册资本别认缴虚高，5 年内要真金白银实缴。
+    </div>
+  </section>
+
+  <!-- ═══════════════ Appendix C ═══════════════ -->
+  <section>
+    <p class="micro">/ Appendix C</p>
+    <h2>办理渠道与咨询电话</h2>
+    <table>
+      <tr><th>事项</th><th>入口</th></tr>
+      <tr><td>个体户设立登记</td><td>北京市企业服务 e 窗通（ftpm.scjgj.beijing.gov.cn）— 搜「个体工商户开办」</td></tr>
+      <tr><td>ICP 备案</td><td>服务器所在云的备案系统（阿里云 beian.aliyun.com / 腾讯云 console.cloud.tencent.com）</td></tr>
+      <tr><td>支付宝开放平台</td><td>open.alipay.com — 入驻 → 自研应用 → 产品签约</td></tr>
+      <tr><td>微信支付商户平台</td><td>pay.weixin.qq.com — 接入微信支付 → 个体工商户</td></tr>
+      <tr><td>创业担保贷款 / 创业补贴</td><td>北京市人社局 12333 · 政务服务网 banshi.beijing.gov.cn</td></tr>
+    </table>
+  </section>
+
+  <footer>
+    <p class="micro">CG Resource Hub · Payment Roadmap</p>
+    <p>政策信息截至 2026 年 9 月，办理前以 支付宝开放平台 / 微信支付商户平台 / 北京市人社局 最新公告为准。<br />
+      生成于 2026-09-04 · 配套代码见仓库 <code>api/server/payment/</code> · 配置说明见 <code>api/.env.example</code> 与 <code>DEPLOY.md</code></p>
+  </footer>
+
+</div>
+</body>
+</html>
