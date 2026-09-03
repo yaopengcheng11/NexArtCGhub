@@ -281,6 +281,7 @@ export const zh: Record<DictKey, string> = {
   'gsplats.backToResources': '资源',
 
   // ====== Taxonomy: filters & badges (Home / Detail) ======
+  'home.filterAll': '全部',
   'home.filterCategory': '软件',
   'home.filterType': '类型',
   'home.filterPrice': '价格',

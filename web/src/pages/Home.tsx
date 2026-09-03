@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { CSSProperties } from 'react';
+import type { ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ArrowUpRight, Package, Sparkles, Stethoscope } from 'lucide-react';
+import { ArrowUpRight, Package, Sparkles, Stethoscope, X } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { motion } from 'motion/react';
+import { AnimatePresence, motion } from 'motion/react';
 import { useI18n } from '../i18n/I18nContext';
 import { ADMIN_CATEGORIES, ADMIN_RESOURCE_TYPES } from '../types/admin';
 
@@ -43,26 +43,6 @@ interface Filters {
 }
 
 const EMPTY_FILTERS: Filters = { category: '', type: '', free: '', sort: 'new' };
-
-const selectStyle: CSSProperties = {
-  background: 'rgba(251, 250, 246, 0.7)',
-  border: '1px solid rgba(26, 24, 20, 0.08)',
-  borderRadius: '9999px',
-  color: 'var(--color-fg-soft)',
-  fontFamily: 'var(--font-mono)',
-  fontSize: '10px',
-  letterSpacing: '0.18em',
-  textTransform: 'uppercase',
-  padding: '8px 32px 8px 16px',
-  outline: 'none',
-  appearance: 'none' as const,
-  backgroundImage:
-    "url(\"data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='6' viewBox='0 0 8 6'%3E%3Cpath d='M1 1l3 3 3-3' stroke='%231a1814' stroke-opacity='0.4' fill='none' stroke-width='1.2'/%3E%3C/svg%3E\")",
-  backgroundRepeat: 'no-repeat',
-  backgroundPosition: 'right 14px center',
-  cursor: 'pointer',
-  transition: 'border-color 0.3s ease',
-};
 
 export default function Home() {
   const { t } = useI18n();
@@ -111,70 +91,15 @@ export default function Home() {
 
   return (
     <div className="mt-2">
-      {/* ─── Taxonomy filter bar ─── */}
+      {/* ─── Taxonomy filter rail ─── */}
       {!loading && resources.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2.5 mb-8">
-          <select
-            aria-label={t('home.filterCategory')}
-            value={filters.category}
-            onChange={(e) => setFilters((f) => ({ ...f, category: e.target.value }))}
-            style={selectStyle}
-          >
-            <option value="">{t('home.filterCategory')}</option>
-            {ADMIN_CATEGORIES.map((c) => (
-              <option key={c} value={c}>{c}</option>
-            ))}
-          </select>
-          <select
-            aria-label={t('home.filterType')}
-            value={filters.type}
-            onChange={(e) => setFilters((f) => ({ ...f, type: e.target.value }))}
-            style={selectStyle}
-          >
-            <option value="">{t('home.filterType')}</option>
-            {ADMIN_RESOURCE_TYPES.map((tp) => (
-              <option key={tp} value={tp}>{t(`resourceType.${tp}`)}</option>
-            ))}
-          </select>
-          <select
-            aria-label={t('home.filterPrice')}
-            value={filters.free}
-            onChange={(e) => setFilters((f) => ({ ...f, free: e.target.value }))}
-            style={selectStyle}
-          >
-            <option value="">{t('home.filterPrice')}</option>
-            <option value="1">{t('home.badgeFree')}</option>
-            <option value="0">{t('home.badgePaid')}</option>
-          </select>
-          <select
-            aria-label={t('home.filterSort')}
-            value={filters.sort}
-            onChange={(e) => setFilters((f) => ({ ...f, sort: e.target.value as Filters['sort'] }))}
-            style={selectStyle}
-          >
-            <option value="new">{t('home.sortNew')}</option>
-            <option value="downloads">{t('home.sortDownloads')}</option>
-          </select>
-          {filtersActive && (
-            <button
-              type="button"
-              onClick={() => setFilters(EMPTY_FILTERS)}
-              className="text-[10px] uppercase tracking-[0.18em] px-3 py-2 rounded-full transition-colors"
-              style={{
-                color: 'var(--color-accent)', fontFamily: 'var(--font-mono)',
-                border: '1px solid rgba(168, 128, 107, 0.3)',
-              }}
-            >
-              {t('home.filterClear')}
-            </button>
-          )}
-          <span
-            className="ml-auto text-[10px] uppercase tracking-[0.2em]"
-            style={{ color: 'var(--color-fg-faint)', fontFamily: 'var(--font-mono)' }}
-          >
-            {filtered.length} / {resources.length}
-          </span>
-        </div>
+        <FilterRail
+          filters={filters}
+          onChange={setFilters}
+          onClear={() => setFilters(EMPTY_FILTERS)}
+          total={resources.length}
+          shown={filtered.length}
+        />
       )}
 
       {loading ? (
@@ -215,6 +140,309 @@ export default function Home() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Filter rail ─────────────────────────────────────────────────────────
+// Editorial "spec sheet" rail: each taxonomy dimension gets a micro-label
+// and a row of pills. Category + segmented controls carry a shared-layout
+// glider so the active state slides between options instead of snapping.
+
+function FilterRail({
+  filters,
+  onChange,
+  onClear,
+  total,
+  shown,
+}: {
+  filters: Filters;
+  // Functional updater so rapid clicks on different dimensions can't
+  // overwrite each other with a stale closure snapshot.
+  onChange: (update: (prev: Filters) => Filters) => void;
+  onClear: () => void;
+  total: number;
+  shown: number;
+}) {
+  const { t } = useI18n();
+  const filtersActive =
+    filters.category !== '' ||
+    filters.type !== '' ||
+    filters.free !== '' ||
+    filters.sort !== EMPTY_FILTERS.sort;
+
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 16 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
+      className="mb-10 rounded-3xl px-5 py-5 sm:px-7 sm:py-6"
+      style={{
+        background: 'rgba(251, 250, 246, 0.65)',
+        border: '1px solid rgba(26, 24, 20, 0.06)',
+        boxShadow:
+          '0 1px 0 rgba(26, 24, 20, 0.03), 0 20px 50px -25px rgba(26, 24, 20, 0.10)',
+        backdropFilter: 'blur(12px)',
+      }}
+    >
+      {/* Category */}
+      <div className="flex flex-col sm:flex-row sm:items-center gap-2.5 sm:gap-6">
+        <RailLabel text={t('home.filterCategory')} />
+        <div
+          role="group"
+          aria-label={t('home.filterCategory')}
+          className="flex flex-wrap items-center gap-1.5"
+        >
+          <CategoryChip
+            active={filters.category === ''}
+            onClick={() => onChange((f) => ({ ...f, category: '' }))}
+          >
+            {t('home.filterAll')}
+          </CategoryChip>
+          {ADMIN_CATEGORIES.map((c) => (
+            <CategoryChip
+              key={c}
+              active={filters.category === c}
+              onClick={() => onChange((f) => ({ ...f, category: c }))}
+            >
+              {c}
+            </CategoryChip>
+          ))}
+        </div>
+      </div>
+
+      <div className="my-4 h-px bg-[rgba(26,24,20,0.06)]" />
+
+      {/* Type */}
+      <div className="flex flex-col sm:flex-row sm:items-center gap-2.5 sm:gap-6">
+        <RailLabel text={t('home.filterType')} active={filters.type !== ''} />
+        <div
+          role="group"
+          aria-label={t('home.filterType')}
+          className="flex flex-wrap items-center gap-1.5"
+        >
+          <TypeChip
+            active={filters.type === ''}
+            onClick={() => onChange((f) => ({ ...f, type: '' }))}
+          >
+            {t('home.filterAll')}
+          </TypeChip>
+          {ADMIN_RESOURCE_TYPES.map((tp) => (
+            <TypeChip
+              key={tp}
+              active={filters.type === tp}
+              onClick={() => onChange((f) => ({ ...f, type: tp }))}
+            >
+              {t(`resourceType.${tp}`)}
+            </TypeChip>
+          ))}
+        </div>
+      </div>
+
+      <div className="my-4 h-px bg-[rgba(26,24,20,0.06)]" />
+
+      {/* Price + sort + counter */}
+      <div className="flex flex-wrap items-center gap-x-7 gap-y-3">
+        <div className="flex items-center gap-3">
+          <RailLabel text={t('home.filterPrice')} active={filters.free !== ''} />
+          <Segmented
+            layoutId="rail-price-glider"
+            ariaLabel={t('home.filterPrice')}
+            value={filters.free}
+            onChange={(v) => onChange((f) => ({ ...f, free: v as Filters['free'] }))}
+            options={[
+              { value: '', label: t('home.filterAll') },
+              { value: '1', label: t('home.badgeFree') },
+              { value: '0', label: t('home.badgePaid') },
+            ]}
+          />
+        </div>
+        <div className="flex items-center gap-3">
+          <RailLabel text={t('home.filterSort')} active={filters.sort !== EMPTY_FILTERS.sort} />
+          <Segmented
+            layoutId="rail-sort-glider"
+            ariaLabel={t('home.filterSort')}
+            value={filters.sort}
+            onChange={(v) => onChange((f) => ({ ...f, sort: v as Filters['sort'] }))}
+            options={[
+              { value: 'new', label: t('home.sortNew') },
+              { value: 'downloads', label: t('home.sortDownloads') },
+            ]}
+          />
+        </div>
+
+        <div className="ml-auto flex items-center gap-4">
+          <span
+            className="text-[10px] uppercase tracking-[0.2em]"
+            style={{ color: 'var(--color-fg-faint)', fontFamily: 'var(--font-mono)' }}
+          >
+            {shown} / {total}
+          </span>
+          <AnimatePresence initial={false}>
+            {filtersActive && (
+              <motion.button
+                key="clear"
+                type="button"
+                onClick={onClear}
+                initial={{ opacity: 0, scale: 0.85 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.85 }}
+                transition={{ duration: 0.25 }}
+                className="flex items-center gap-1.5 rounded-full px-3 py-[6px] text-[10px] uppercase tracking-[0.16em] cursor-pointer transition-colors duration-300 hover:bg-[rgba(168,128,107,0.08)]"
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  color: 'var(--color-accent)',
+                  border: '1px solid rgba(168, 128, 107, 0.30)',
+                }}
+              >
+                <X className="w-3 h-3" strokeWidth={1.5} />
+                {t('home.filterClear')}
+              </motion.button>
+            )}
+          </AnimatePresence>
+        </div>
+      </div>
+    </motion.section>
+  );
+}
+
+function RailLabel({ text, active = false }: { text: string; active?: boolean }) {
+  return (
+    <span
+      className="flex items-center gap-2 sm:w-24 shrink-0 text-[10px] uppercase tracking-[0.22em] transition-colors duration-300"
+      style={{
+        fontFamily: 'var(--font-mono)',
+        color: active ? 'var(--color-accent)' : 'var(--color-fg-faint)',
+      }}
+    >
+      <span
+        className="h-1 w-1 rounded-full transition-colors duration-300"
+        style={{ background: active ? 'var(--color-accent)' : 'transparent' }}
+        aria-hidden
+      />
+      {text}
+    </span>
+  );
+}
+
+function CategoryChip({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={cn(
+        'relative rounded-full px-4 py-[7px] text-[11px] font-medium uppercase tracking-[0.14em]',
+        'cursor-pointer transition-colors duration-300',
+        active ? 'text-[color:var(--color-elevated)]' : 'text-[color:var(--color-fg-soft)]'
+      )}
+    >
+      {active ? (
+        <motion.span
+          layoutId="rail-category-glider"
+          className="absolute inset-0 rounded-full"
+          style={{
+            background: 'var(--color-fg)',
+            boxShadow: '0 10px 24px -12px rgba(26, 24, 20, 0.55)',
+          }}
+          transition={{ type: 'spring', stiffness: 500, damping: 40 }}
+        />
+      ) : (
+        <span className="absolute inset-0 rounded-full bg-[rgba(26,24,20,0.05)] opacity-0 transition-opacity duration-300 hover:opacity-100" />
+      )}
+      <span className="relative z-10 whitespace-nowrap">{children}</span>
+    </button>
+  );
+}
+
+function TypeChip({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={cn(
+        'rounded-full px-3 py-[5px] text-[10px] font-medium uppercase tracking-[0.12em]',
+        'border cursor-pointer transition-all duration-300 whitespace-nowrap',
+        active
+          ? 'text-[color:var(--color-accent)] bg-[rgba(168,128,107,0.10)] border-[rgba(168,128,107,0.32)]'
+          : 'text-[color:var(--color-fg-muted)] bg-transparent border-[rgba(26,24,20,0.10)] hover:text-[color:var(--color-fg-soft)] hover:border-[rgba(26,24,20,0.24)] hover:bg-[rgba(26,24,20,0.03)]'
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Segmented({
+  layoutId,
+  value,
+  onChange,
+  options,
+  ariaLabel,
+}: {
+  layoutId: string;
+  value: string;
+  onChange: (v: string) => void;
+  options: { value: string; label: string }[];
+  ariaLabel: string;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label={ariaLabel}
+      className="inline-flex items-center rounded-full p-[3px]"
+      style={{
+        background: 'rgba(26, 24, 20, 0.05)',
+        border: '1px solid rgba(26, 24, 20, 0.04)',
+      }}
+    >
+      {options.map((opt) => {
+        const active = value === opt.value;
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            aria-pressed={active}
+            onClick={() => onChange(opt.value)}
+            className={cn(
+              'relative rounded-full px-3.5 py-[5px] text-[10px] font-medium uppercase tracking-[0.14em]',
+              'cursor-pointer transition-colors duration-300',
+              active ? 'text-[color:var(--color-fg)]' : 'text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg-soft)]'
+            )}
+          >
+            {active && (
+              <motion.span
+                layoutId={layoutId}
+                className="absolute inset-0 rounded-full"
+                style={{
+                  background: 'var(--color-elevated)',
+                  boxShadow:
+                    '0 1px 0 rgba(26, 24, 20, 0.04), 0 2px 10px -2px rgba(26, 24, 20, 0.18)',
+                }}
+                transition={{ type: 'spring', stiffness: 500, damping: 40 }}
+              />
+            )}
+            <span className="relative z-10 whitespace-nowrap">{opt.label}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }

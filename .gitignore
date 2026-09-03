@@ -86,3 +86,7 @@ web/scripts/
 
 # baidu-pan share batch run output (regenerated each run)
 .shares_map.json
+
+# TypeScript build artifacts
+web/tsconfig.tsbuildinfo
+api/tsconfig.tsbuildinfo

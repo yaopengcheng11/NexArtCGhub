@@ -295,6 +295,7 @@ export const en = {
   'gsplats.backToResources': 'Resources',
 
   // ====== Taxonomy: filters & badges (Home / Detail) ======
+  'home.filterAll': 'All',
   'home.filterCategory': 'Software',
   'home.filterType': 'Type',
   'home.filterPrice': 'Price',
