@@ -5,6 +5,9 @@ export const en = {
   // ====== Navbar ======
   // ====== Navbar ======
   'nav.resources': 'Resources',
+  'nav.pricing': 'Pricing',
+  'nav.buyCredits': 'Buy credits',
+  'nav.menu': 'Menu',
   'nav.controlRoom': 'Control room',
   'nav.signIn': 'Sign in',
   'nav.register': 'Register',

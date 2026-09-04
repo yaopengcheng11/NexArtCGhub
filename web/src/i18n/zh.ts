@@ -7,6 +7,9 @@ import type { DictKey } from './dictionaries';
 export const zh: Record<DictKey, string> = {
   // ====== Navbar ======
   'nav.resources': '资源',
+  'nav.pricing': '购买',
+  'nav.buyCredits': '购买次数',
+  'nav.menu': '菜单',
   'nav.controlRoom': '控制台',
   'nav.signIn': '登录',
   'nav.register': '注册',
