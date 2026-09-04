@@ -127,7 +127,7 @@ export default function Home() {
           </button>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-6">
           {!filtersActive && (
             <>
               <ToolFeatureCard kind="path-doctor" index={0} />
@@ -176,7 +176,7 @@ function FilterRail({
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
-      className="mb-10 rounded-3xl px-5 py-5 sm:px-7 sm:py-6"
+      className="mb-6 sm:mb-10 rounded-3xl px-4 py-4 sm:px-7 sm:py-6"
       style={{
         background: 'rgba(251, 250, 246, 0.65)',
         border: '1px solid rgba(26, 24, 20, 0.06)',
@@ -493,7 +493,7 @@ function ResourceCard({
         }
       }}
       className={cn(
-        'group relative flex flex-col overflow-hidden rounded-3xl cursor-pointer',
+        'group relative flex flex-col overflow-hidden rounded-2xl sm:rounded-3xl cursor-pointer',
         className
       )}
       style={{
@@ -515,7 +515,7 @@ function ResourceCard({
         e.currentTarget.style.background = 'rgba(251, 250, 246, 0.7)';
       }}
     >
-      <div className="relative h-44 overflow-hidden" style={{ background: 'var(--color-deep)' }}>
+      <div className="relative h-28 sm:h-44 overflow-hidden" style={{ background: 'var(--color-deep)' }}>
         {resource.imageUrl ? (
           <img
             src={resource.imageUrl}
@@ -534,7 +534,7 @@ function ResourceCard({
         {/* Free / Paid badge */}
         {resource.isFree !== undefined && resource.isFree !== null && (
           <span
-            className="absolute top-4 left-4 px-3 py-1 text-[10px] font-medium rounded-full z-10 uppercase tracking-[0.15em]"
+            className="absolute top-2 left-2 sm:top-4 sm:left-4 px-2 py-0.5 sm:px-3 sm:py-1 text-[9px] sm:text-[10px] font-medium rounded-full z-10 uppercase tracking-[0.15em]"
             style={{
               background: 'rgba(251, 250, 246, 0.92)',
               color: resource.isFree ? '#4a7c59' : 'var(--color-accent)',
@@ -547,11 +547,11 @@ function ResourceCard({
         )}
       </div>
 
-      <div className="p-6 flex flex-col flex-1">
-        <div className="flex items-center gap-2 flex-wrap mb-2">
+      <div className="p-3 sm:p-6 flex flex-col flex-1">
+        <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap mb-1 sm:mb-2">
           {resource.resType && (
             <span
-              className="text-[9px] uppercase tracking-[0.2em] px-2 py-0.5 rounded-full"
+              className="text-[8px] sm:text-[9px] uppercase tracking-[0.2em] px-1.5 py-0.5 sm:px-2 rounded-full"
               style={{
                 color: 'var(--color-fg-soft)', fontFamily: 'var(--font-mono)',
                 background: 'rgba(26, 24, 20, 0.04)',
@@ -561,7 +561,7 @@ function ResourceCard({
             </span>
           )}
           <h3
-            className="text-base leading-snug line-clamp-2"
+            className="text-[13px] sm:text-base leading-snug line-clamp-2"
             style={{
               fontFamily: 'var(--font-display)',
               fontWeight: 500,
@@ -573,14 +573,14 @@ function ResourceCard({
           </h3>
         </div>
         <p
-          className="text-xs leading-relaxed mb-5 line-clamp-2 flex-1"
+          className="hidden sm:block text-xs leading-relaxed mb-5 line-clamp-2 flex-1"
           style={{ color: 'var(--color-fg-muted)', fontWeight: 300 }}
         >
           {resource.description}
         </p>
 
         {parsedTags.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mb-5">
+          <div className="hidden sm:flex flex-wrap gap-1.5 mb-5">
             {parsedTags.slice(0, 3).map((t, i) => (
               <span
                 key={i}
@@ -597,16 +597,16 @@ function ResourceCard({
         )}
 
         <div
-          className="flex items-center justify-end pt-4"
+          className="flex items-center justify-end pt-2.5 sm:pt-4 mt-auto"
           style={{ borderTop: '1px solid rgba(26, 24, 20, 0.05)' }}
         >
           <span
-            className="flex items-center gap-1.5 text-[10px] uppercase tracking-[0.2em] transition-colors group-hover:text-[color:var(--color-accent)]"
+            className="flex items-center gap-1.5 text-[9px] sm:text-[10px] uppercase tracking-[0.2em] transition-colors group-hover:text-[color:var(--color-accent)]"
             style={{ color: 'var(--color-fg-soft)', fontFamily: 'var(--font-mono)' }}
           >
             {t('home.view')}
             <ArrowUpRight
-              className="w-3.5 h-3.5 transition-transform duration-300 group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
+              className="w-3 h-3 sm:w-3.5 sm:h-3.5 transition-transform duration-300 group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
               strokeWidth={1.5}
             />
           </span>
@@ -636,7 +636,7 @@ function ToolFeatureCard({
         ease: [0.22, 1, 0.36, 1],
       }}
       whileHover={{ y: -4 }}
-      className="group relative flex flex-col overflow-hidden rounded-3xl cursor-pointer"
+      className="group relative flex flex-col overflow-hidden rounded-2xl sm:rounded-3xl cursor-pointer"
       style={{
         background: 'rgba(251, 250, 246, 0.7)',
         border: '1px solid rgba(168, 128, 107, 0.18)',
@@ -663,14 +663,14 @@ function ToolFeatureCard({
       >
         {/* Top banner with icon */}
         <div
-          className="relative h-44 overflow-hidden flex items-center justify-center"
+          className="relative h-28 sm:h-44 overflow-hidden flex items-center justify-center"
           style={{
             background: cfg.bannerStyle,
           }}
         >
           {/* Live badge */}
           <span
-            className="absolute top-4 left-4 px-3 py-1 text-[10px] font-medium rounded-full z-10 uppercase tracking-[0.15em] inline-flex items-center gap-1.5"
+            className="absolute top-2 left-2 sm:top-4 sm:left-4 px-2 py-0.5 sm:px-3 sm:py-1 text-[9px] sm:text-[10px] font-medium rounded-full z-10 uppercase tracking-[0.15em] inline-flex items-center gap-1.5"
             style={{
               background: 'rgba(251, 250, 246, 0.92)',
               color: 'var(--color-accent)',
@@ -689,15 +689,15 @@ function ToolFeatureCard({
             {t('home.toolTagLiveService')}
           </span>
           <Icon
-            className="w-16 h-16 transition-transform duration-700 group-hover:scale-110 group-hover:-rotate-3"
+            className="w-10 h-10 sm:w-16 sm:h-16 transition-transform duration-700 group-hover:scale-110 group-hover:-rotate-3"
             style={{ color: 'var(--color-accent)', strokeWidth: 1.2 }}
             aria-hidden
           />
         </div>
 
-        <div className="p-6 flex flex-col flex-1">
+        <div className="p-3 sm:p-6 flex flex-col flex-1">
           <h3
-            className="text-base leading-snug mb-2"
+            className="text-[13px] sm:text-base leading-snug mb-1 sm:mb-2"
             style={{
               fontFamily: 'var(--font-display)',
               fontWeight: 500,
@@ -708,13 +708,13 @@ function ToolFeatureCard({
             {t(cfg.titleKey)}
           </h3>
           <p
-            className="text-xs leading-relaxed mb-5 line-clamp-2 flex-1"
+            className="hidden sm:block text-xs leading-relaxed mb-5 line-clamp-2 flex-1"
             style={{ color: 'var(--color-fg-muted)', fontWeight: 300 }}
           >
             {t(cfg.ledeKey)}
           </p>
 
-          <div className="flex flex-wrap gap-1.5 mb-5">
+          <div className="hidden sm:flex flex-wrap gap-1.5 mb-5">
             {cfg.tags.map((tagKey) => (
               <span
                 key={tagKey}
@@ -730,22 +730,22 @@ function ToolFeatureCard({
           </div>
 
           <div
-            className="flex justify-between items-center pt-4"
+            className="flex items-center justify-end sm:justify-between pt-2.5 sm:pt-4 mt-auto"
             style={{ borderTop: '1px solid rgba(26, 24, 20, 0.05)' }}
           >
             <span
-              className="text-[10px] uppercase tracking-[0.2em]"
+              className="hidden sm:inline text-[10px] uppercase tracking-[0.2em]"
               style={{ color: 'var(--color-fg-muted)', fontFamily: 'var(--font-mono)' }}
             >
               {t('home.toolRunServerSide')}
             </span>
             <span
-              className="flex items-center gap-1.5 text-[10px] uppercase tracking-[0.2em] transition-colors group-hover:text-[color:var(--color-accent)]"
+              className="flex items-center gap-1.5 text-[9px] sm:text-[10px] uppercase tracking-[0.2em] transition-colors group-hover:text-[color:var(--color-accent)]"
               style={{ color: 'var(--color-fg-soft)', fontFamily: 'var(--font-mono)' }}
             >
               {t('home.openTool')}
               <ArrowUpRight
-                className="w-3.5 h-3.5 transition-transform duration-300 group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
+                className="w-3 h-3 sm:w-3.5 sm:h-3.5 transition-transform duration-300 group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
                 strokeWidth={1.5}
               />
             </span>
