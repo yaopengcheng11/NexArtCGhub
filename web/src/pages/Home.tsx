@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
-import type { CSSProperties, ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ArrowUpRight, Package, Sparkles, Stethoscope, X } from 'lucide-react';
+import { ArrowUpRight, Check, ChevronDown, Package, Sparkles, Stethoscope, X } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { AnimatePresence, motion } from 'motion/react';
 import { useI18n } from '../i18n/I18nContext';
@@ -43,28 +43,6 @@ interface Filters {
 }
 
 const EMPTY_FILTERS: Filters = { category: '', type: '', free: '', sort: 'new' };
-
-// Mobile/tablet compact dropdowns (native select = native picker wheel).
-// The editorial chip rail takes ~500px of vertical space below lg, so
-// small screens get these instead.
-const selectStyle: CSSProperties = {
-  background: 'rgba(251, 250, 246, 0.9)',
-  border: '1px solid rgba(26, 24, 20, 0.10)',
-  borderRadius: '9999px',
-  color: 'var(--color-fg-soft)',
-  fontFamily: 'var(--font-mono)',
-  fontSize: '11px',
-  letterSpacing: '0.12em',
-  textTransform: 'uppercase',
-  padding: '9px 30px 9px 14px',
-  outline: 'none',
-  appearance: 'none' as const,
-  backgroundImage:
-    "url(\"data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='6' viewBox='0 0 8 6'%3E%3Cpath d='M1 1l3 3 3-3' stroke='%231a1814' stroke-opacity='0.4' fill='none' stroke-width='1.2'/%3E%3C/svg%3E\")",
-  backgroundRepeat: 'no-repeat',
-  backgroundPosition: 'right 12px center',
-  cursor: 'pointer',
-};
 
 export default function Home() {
   const { t } = useI18n();
@@ -198,7 +176,7 @@ function FilterRail({
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
-      className="mb-6 sm:mb-10 rounded-3xl px-4 py-4 sm:px-7 sm:py-6"
+      className="relative z-20 mb-6 sm:mb-10 rounded-3xl px-4 py-4 sm:px-7 sm:py-6"
       style={{
         background: 'rgba(251, 250, 246, 0.65)',
         border: '1px solid rgba(26, 24, 20, 0.06)',
@@ -304,49 +282,46 @@ function FilterRail({
         </div>
       </div>
 
-      {/* <lg: compact dropdown selects */}
+      {/* <lg: compact dropdowns */}
       <div className="lg:hidden flex flex-wrap items-center gap-2">
-        <select
-          aria-label={t('home.filterCategory')}
+        <FilterDropdown
+          label={t('home.filterCategory')}
           value={filters.category}
-          onChange={(e) => onChange((f) => ({ ...f, category: e.target.value }))}
-          style={selectStyle}
-        >
-          <option value="">{t('home.filterCategory')}</option>
-          {ADMIN_CATEGORIES.map((c) => (
-            <option key={c} value={c}>{c}</option>
-          ))}
-        </select>
-        <select
-          aria-label={t('home.filterType')}
+          onChange={(v) => onChange((f) => ({ ...f, category: v }))}
+          options={[
+            { value: '', label: t('home.filterAll') },
+            ...ADMIN_CATEGORIES.map((c) => ({ value: c, label: c })),
+          ]}
+        />
+        <FilterDropdown
+          label={t('home.filterType')}
           value={filters.type}
-          onChange={(e) => onChange((f) => ({ ...f, type: e.target.value }))}
-          style={selectStyle}
-        >
-          <option value="">{t('home.filterType')}</option>
-          {ADMIN_RESOURCE_TYPES.map((tp) => (
-            <option key={tp} value={tp}>{t(`resourceType.${tp}`)}</option>
-          ))}
-        </select>
-        <select
-          aria-label={t('home.filterPrice')}
+          onChange={(v) => onChange((f) => ({ ...f, type: v }))}
+          options={[
+            { value: '', label: t('home.filterAll') },
+            ...ADMIN_RESOURCE_TYPES.map((tp) => ({ value: tp, label: t(`resourceType.${tp}`) })),
+          ]}
+        />
+        <FilterDropdown
+          label={t('home.filterPrice')}
           value={filters.free}
-          onChange={(e) => onChange((f) => ({ ...f, free: e.target.value as Filters['free'] }))}
-          style={selectStyle}
-        >
-          <option value="">{t('home.filterPrice')}</option>
-          <option value="1">{t('home.badgeFree')}</option>
-          <option value="0">{t('home.badgePaid')}</option>
-        </select>
-        <select
-          aria-label={t('home.filterSort')}
+          onChange={(v) => onChange((f) => ({ ...f, free: v as Filters['free'] }))}
+          options={[
+            { value: '', label: t('home.filterAll') },
+            { value: '1', label: t('home.badgeFree') },
+            { value: '0', label: t('home.badgePaid') },
+          ]}
+        />
+        <FilterDropdown
+          label={t('home.filterSort')}
           value={filters.sort}
-          onChange={(e) => onChange((f) => ({ ...f, sort: e.target.value as Filters['sort'] }))}
-          style={selectStyle}
-        >
-          <option value="new">{t('home.sortNew')}</option>
-          <option value="downloads">{t('home.sortDownloads')}</option>
-        </select>
+          onChange={(v) => onChange((f) => ({ ...f, sort: v as Filters['sort'] }))}
+          active={filters.sort !== EMPTY_FILTERS.sort}
+          options={[
+            { value: 'new', label: t('home.sortNew') },
+            { value: 'downloads', label: t('home.sortDownloads') },
+          ]}
+        />
 
         <div className="ml-auto flex items-center gap-3">
           <RailCounter shown={shown} total={total} />
@@ -367,6 +342,124 @@ function RailCounter({ shown, total }: { shown: number; total: number }) {
     >
       {shown} / {total}
     </span>
+  );
+}
+
+// ─── Custom filter dropdown ──────────────────────────────────────────────
+// Native <select> popovers clash with the Ethereal system, so small
+// screens get this: a pill trigger (accent-tinted when the dimension is
+// filtered) opening a glass option sheet with a check on the active row.
+
+function FilterDropdown({
+  label,
+  value,
+  options,
+  onChange,
+  active = false,
+}: {
+  /** Placeholder shown when nothing is selected. */
+  label: string;
+  value: string;
+  options: { value: string; label: string }[];
+  onChange: (v: string) => void;
+  /** Extra accent emphasis (e.g. non-default sort). */
+  active?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const current = options.find((o) => o.value === value);
+  const display = current && value !== '' ? current.label : label;
+  const highlight = active || value !== '';
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className={cn(
+          'flex items-center gap-2 rounded-full pl-4 pr-3 py-[9px] text-[11px] font-medium uppercase tracking-[0.12em]',
+          'cursor-pointer transition-colors duration-300'
+        )}
+        style={
+          highlight
+            ? {
+                background: 'rgba(168, 128, 107, 0.10)',
+                border: '1px solid rgba(168, 128, 107, 0.32)',
+                color: 'var(--color-accent)',
+              }
+            : {
+                background: 'rgba(251, 250, 246, 0.9)',
+                border: '1px solid rgba(26, 24, 20, 0.10)',
+                color: 'var(--color-fg-soft)',
+              }
+        }
+      >
+        <span className="whitespace-nowrap">{display}</span>
+        <ChevronDown
+          className={cn('w-3 h-3 transition-transform duration-300', open && 'rotate-180')}
+          strokeWidth={1.8}
+        />
+      </button>
+
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ opacity: 0, y: -6, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -6, scale: 0.97 }}
+            transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+            className="absolute left-0 top-full mt-2 z-30 min-w-[150px] max-h-[300px] overflow-y-auto rounded-2xl p-1.5"
+            style={{
+              background: 'var(--color-elevated)',
+              border: '1px solid rgba(26, 24, 20, 0.08)',
+              boxShadow:
+                '0 1px 0 rgba(26,24,20,0.04), 0 24px 60px -18px rgba(26,24,20,0.30)',
+            }}
+          >
+            {options.map((opt) => {
+              const isActive = opt.value === value;
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => {
+                    onChange(opt.value);
+                    setOpen(false);
+                  }}
+                  className={cn(
+                    'w-full flex items-center justify-between gap-4 px-3 py-2.5 rounded-xl text-[11px] font-medium uppercase tracking-[0.12em] text-left cursor-pointer transition-colors duration-200',
+                    isActive
+                      ? 'bg-[rgba(168,128,107,0.10)] text-[color:var(--color-accent)]'
+                      : 'text-[color:var(--color-fg-soft)] hover:bg-[rgba(26,24,20,0.05)]'
+                  )}
+                >
+                  <span className="whitespace-nowrap">{opt.label}</span>
+                  {isActive && <Check className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />}
+                </button>
+              );
+            })}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
   );
 }
 
