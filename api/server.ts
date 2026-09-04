@@ -800,6 +800,17 @@ async function startServer() {
   // is treated as "unlimited" (no decrement, no monthly reset).
   const FREE_TIER_CREDITS = 3;
 
+  // One-time repair for accounts registered before creditsRemaining had a
+  // default: a NULL balance made `creditsRemaining + ?` evaluate to NULL,
+  // silently swallowing fulfilled payments. Their reset anchor is also
+  // NULL, so give them the free tier starting now.
+  await db.run(
+    `UPDATE users
+       SET creditsRemaining = ?, creditsResetAt = datetime('now')
+     WHERE creditsRemaining IS NULL OR creditsResetAt IS NULL`,
+    [FREE_TIER_CREDITS]
+  );
+
   // requireAuth — verifies the JWT, fetches fresh user row, lazily resets
   // monthly credits. The reset is "lazy" (not cron) so it works on any
   // deploy without infra. A user who logs in for the first time this month
@@ -932,8 +943,12 @@ async function startServer() {
       if (existing) return res.status(409).json({ error: 'User already exists' });
       const hash = await bcrypt.hash(password, 12);
       const r: any = await db.run(
-        `INSERT INTO users (username, email, password, role) VALUES (?, ?, ?, 'user')`,
-        [username, email || null, hash]
+        `INSERT INTO users (username, email, password, role, creditsRemaining, creditsResetAt)
+         VALUES (?, ?, ?, 'user', ?, datetime('now'))`,
+        // creditsRemaining must be a NUMBER from day one: the fulfilment
+        // UPDATE does `creditsRemaining + ?` and NULL+30 stays NULL, which
+        // silently swallowed every payment for fresh accounts.
+        [username, email || null, hash, FREE_TIER_CREDITS]
       );
       const newUserId = r.lastID;
       if (!isMasterCode) {
@@ -1034,8 +1049,11 @@ async function startServer() {
         : null;
     if (!cnMethod && !STRIPE_SECRET_KEY) {
       return res.status(503).json({
-        error: 'stripe_not_configured',
-        message: 'Payments are not yet wired up. Set STRIPE_SECRET_KEY in api/.env to test.',
+        error: currency === 'cny' ? 'cn_gateways_not_configured' : 'stripe_not_configured',
+        message:
+          currency === 'cny'
+            ? '支付宝 / 微信支付尚未接入:需在 api/.env 配置 ALIPAY_* / WXPAY_* 商户密钥;本地开发可设 PAYMENT_MOCK=1 体验完整流程。'
+            : 'Payments are not yet wired up. Set STRIPE_SECRET_KEY in api/.env to test.',
       });
     }
     const productName = `HIP Path Doctor — ${tier.name} (${tier.credits} credits)`;
@@ -1118,8 +1136,11 @@ async function startServer() {
         : null;
     if (!cnMethod && !STRIPE_SECRET_KEY) {
       return res.status(503).json({
-        error: 'stripe_not_configured',
-        message: 'Payments are not yet wired up. Set STRIPE_SECRET_KEY in api/.env to test.',
+        error: currency === 'cny' ? 'cn_gateways_not_configured' : 'stripe_not_configured',
+        message:
+          currency === 'cny'
+            ? '支付宝 / 微信支付尚未接入:需在 api/.env 配置 ALIPAY_* / WXPAY_* 商户密钥;本地开发可设 PAYMENT_MOCK=1 体验完整流程。'
+            : 'Payments are not yet wired up. Set STRIPE_SECRET_KEY in api/.env to test.',
       });
     }
     if (!fs.existsSync(HDA_FILE_PATH)) {

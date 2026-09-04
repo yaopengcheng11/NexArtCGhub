@@ -64,8 +64,10 @@ export async function fulfilPayment(args: FulfilPaymentArgs): Promise<FulfilResu
     );
     const user: any = await db.get(`SELECT isSubscribed FROM users WHERE id = ?`, [userId]);
     if (!user?.isSubscribed) {
+      // COALESCE: a legacy NULL balance must not swallow the credit grant
+      // (NULL + 30 would otherwise stay NULL).
       await db.run(
-        `UPDATE users SET creditsRemaining = creditsRemaining + ? WHERE id = ?`,
+        `UPDATE users SET creditsRemaining = COALESCE(creditsRemaining, 0) + ? WHERE id = ?`,
         [credits, userId]
       );
     }
